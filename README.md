@@ -153,3 +153,61 @@ bun run build         # Build to dist/
 - [docs/mcp-json-example.json](docs/mcp-json-example.json) — `.mcp.json` snippet
 - [docs/channels-json-example.json](docs/channels-json-example.json) — `channels.json` snippet
 - [docs/notify-claude.yml](docs/notify-claude.yml) — Optional: trigger from GitHub Actions workflow
+
+## Option C: GitHub CLI Events watcher (no tunnel)
+
+If you don't want to run a tunnel, `src/ghwatch.ts` polls the [GitHub Events API](https://docs.github.com/en/rest/activity/events) for completed `WorkflowRunEvent`s. It uses your existing `gh` CLI session — no extra token config needed.
+
+```
+GitHub Events API  ←── poll every ~60s (ETag + X-Poll-Interval respected)
+        │
+        ▼
+[ghwatch.ts process]
+        │  WorkflowRunEvent completed → parseWorkflowEvent()
+        ▼
+notifications/claude/channel
+        │
+        ▼
+Claude Code session
+```
+
+**Trade-off vs webhooks:** GitHub's public events stream has ~30–60 s latency and only includes events on *public* repos (or private repos you have access to via the token). For instant notifications on private repos, use the webhook approach.
+
+### Setup
+
+```bash
+# 1. Authenticate gh CLI (skip if already done)
+gh auth login
+
+# 2. Add to .mcp.json — use ghwatch.ts entrypoint instead of index.ts
+```
+
+```json
+{
+  "mcpServers": {
+    "github-ci": {
+      "command": "bun",
+      "args": ["run", "/path/to/claude-code-github-ci-channel/src/ghwatch.ts"],
+      "env": {
+        "WATCH_REPOS": "owner/repo1,owner/repo2"
+      }
+    }
+  }
+}
+```
+
+If you prefer an explicit token over `gh auth` (e.g. in CI or a different machine):
+
+```json
+"env": {
+  "WATCH_REPOS": "owner/repo1,owner/repo2",
+  "GITHUB_TOKEN": "ghp_your_token"
+}
+```
+
+```bash
+# 3. Start Claude Code with channels enabled
+claude --dangerously-load-development-channels server:github-ci
+```
+
+No GitHub webhook registration, no tunnel. Works out of the box if you already use `gh`.

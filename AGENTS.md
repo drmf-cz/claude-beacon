@@ -139,3 +139,38 @@ bun run build         # Build to dist/
 2. Add a case in `parseWorkflowEvent()` in `src/server.ts`
 3. Update `isActionable()` if needed
 4. Add tests in `src/__tests__/server.test.ts`
+
+## Option C: GitHub CLI Events Watcher (`src/ghwatch.ts`)
+
+An alternative to webhooks+tunnel. Polls the GitHub Events API instead of receiving pushes.
+
+**How it works:**
+1. On startup, seeds existing event IDs (no re-notification for past runs)
+2. Polls `/repos/{owner}/{repo}/events` respecting `X-Poll-Interval` (server-dictated, typically 60s) and `ETag` (304 responses avoid data transfer when nothing changed)
+3. Filters `WorkflowRunEvent` with `action: completed` → `parseWorkflowEvent()` → `notifications/claude/channel`
+
+**Auth:** calls `gh auth token` to reuse existing `gh` CLI session. Falls back to `GITHUB_TOKEN` env var.
+
+**Entrypoint registration:**
+```json
+{
+  "mcpServers": {
+    "github-ci": {
+      "command": "bun",
+      "args": ["run", "/path/to/src/ghwatch.ts"],
+      "env": { "WATCH_REPOS": "owner/repo1,owner/repo2" }
+    }
+  }
+}
+```
+
+**When to use:**
+- Public repos (events API always works)
+- Private repos where you have access via the token  
+- When you can't or don't want to run a tunnel
+- Acceptable 30–60s notification latency
+
+**When to prefer webhooks:**
+- Need sub-second notification latency
+- Private repos behind an org that restricts Events API
+- Want to receive `workflow_job` and `check_suite` events (not in Events API)

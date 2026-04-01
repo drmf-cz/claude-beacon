@@ -12,6 +12,7 @@
     "lint:fix": "biome check --write src/",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
+    "watch": "bun run src/ghwatch.ts",
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.2"
