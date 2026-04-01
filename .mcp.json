@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github-ci": {
+      "command": "/home/martinv/.bun/bin/bun",
+      "args": ["run", "/home/martinv/gt/ghci/mayor/rig/src/index.ts"],
+      "env": {
+        "WEBHOOK_PORT": "9443",
+        "GITHUB_WEBHOOK_SECRET": "",
+        "GITHUB_TOKEN": ""
+      }
+    }
+  }
+}
