@@ -217,8 +217,12 @@ const log = (...args: unknown[]) => console.error("[github-ci]", ...args);
 export function verifySignature(payload: string, signature: string | null): boolean {
   const secret = process.env.GITHUB_WEBHOOK_SECRET ?? "";
   if (!secret) {
-    log("WARNING: No GITHUB_WEBHOOK_SECRET set — skipping verification (dev mode)");
-    return true;
+    if (process.env.WEBHOOK_DEV_MODE === "true") {
+      log("WARNING: No GITHUB_WEBHOOK_SECRET set — skipping verification (WEBHOOK_DEV_MODE=true)");
+      return true;
+    }
+    log("ERROR: No GITHUB_WEBHOOK_SECRET configured — rejecting request (set WEBHOOK_DEV_MODE=true to bypass in dev)");
+    return false;
   }
   if (!signature) return false;
 
@@ -261,13 +265,15 @@ function parseWorkflowRunEvent(
 
   const status = run.conclusion ?? run.status;
   const emoji = statusEmoji(run.conclusion);
-  const commitMsg = run.head_commit?.message?.split("\n")[0] ?? "";
+  const commitMsg = sanitizeBody(run.head_commit?.message?.split("\n")[0] ?? "", 200);
+  const headBranch = sanitizeBody(run.head_branch ?? "", 100);
+  const workflowName = sanitizeBody(run.name ?? "", 100);
   const duration = formatDuration(run.run_started_at, run.updated_at);
   const isMainBranch = MAIN_BRANCHES.has(run.head_branch);
 
   const lines = [
-    `${emoji} CI ${status.toUpperCase()}: ${run.name} on ${repo}`,
-    `Branch: ${run.head_branch} | Commit: "${commitMsg}"`,
+    `${emoji} CI ${status.toUpperCase()}: ${workflowName} on ${repo}`,
+    `Branch: ${headBranch} | Commit: "${commitMsg}"`,
     `Duration: ${duration} | Run #${run.run_number}`,
     `URL: ${run.html_url}`,
   ];
@@ -292,7 +298,7 @@ function parseWorkflowRunEvent(
         "",
         "Act immediately — no confirmation needed.",
         "Use the Agent tool NOW to spawn a subagent with these instructions:",
-        `Investigate the CI failure on branch ${run.head_branch} in ${repo}:`,
+        `Investigate the CI failure on branch ${headBranch} in ${repo}:`,
         `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
         "2. Identify the root cause and fix it",
         "3. Push the fix to the branch.",
@@ -553,21 +559,14 @@ export async function checkPRsAfterPush(
 
     log(`PR #${pr.number} is ${state} — notifying Claude`);
     try {
-      await mcp.server.notification({
-        method: "notifications/claude/channel",
-        params: {
-          channel: "github-ci",
-          content: notification.summary,
-          meta: notification.meta,
-        },
-      });
+      await sendChannelNotification(mcp, notification);
     } catch (err) {
       log(`Failed to notify for PR #${pr.number}:`, err);
     }
   }
 }
 
-type ReviewPayload = {
+export type ReviewPayload = {
   reviewEvent: ReviewEventRecord;
   prMeta: { prNumber: number; prTitle: string; prUrl: string; repo: string };
 };
@@ -743,24 +742,18 @@ export function createMcpServer(): McpServer {
 async function sendChannelNotification(
   mcp: McpServer,
   notification: CINotification,
-): Promise<Response | null> {
-  try {
-    await mcp.server.notification({
-      method: "notifications/claude/channel",
-      params: {
-        channel: "github-ci",
-        content: notification.summary,
-        meta: notification.meta,
-      },
-    });
-    log(
-      `Pushed to Claude: ${notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
-    );
-    return null;
-  } catch (err) {
-    log("Failed to send notification:", err);
-    return new Response("Notification failed", { status: 500 });
-  }
+): Promise<void> {
+  await mcp.server.notification({
+    method: "notifications/claude/channel",
+    params: {
+      channel: "github-ci",
+      content: notification.summary,
+      meta: notification.meta,
+    },
+  });
+  log(
+    `Pushed to Claude: ${notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
+  );
 }
 
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────
@@ -844,17 +837,8 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
             async (evts, meta) => {
               const notification = buildReviewNotification(evts, meta);
               try {
-                await mcp.server.notification({
-                  method: "notifications/claude/channel",
-                  params: {
-                    channel: "github-ci",
-                    content: notification.summary,
-                    meta: notification.meta,
-                  },
-                });
-                log(
-                  `PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`,
-                );
+                await sendChannelNotification(mcp, notification);
+                log(`PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`);
               } catch (err) {
                 log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
               }
@@ -881,8 +865,12 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         return new Response("Unparseable", { status: 200 });
       }
 
-      const errResp = await sendChannelNotification(mcp, notification);
-      if (errResp) return errResp;
+      try {
+        await sendChannelNotification(mcp, notification);
+      } catch (err) {
+        log("Failed to send notification:", err);
+        return new Response("Notification failed", { status: 500 });
+      }
       return new Response("OK", { status: 200 });
     },
   });

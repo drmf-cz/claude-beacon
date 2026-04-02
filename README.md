@@ -270,12 +270,18 @@ bun run lint:fix      # Auto-fix lint issues
 bun run build         # Bundle to dist/
 ```
 
+### Linting
+
+Biome v2 is configured in `biome.json` with strict rules. One deliberate deviation from the defaults:
+
+- **`maxAllowedComplexity: 45`** — Biome's recommended default is 15. The main webhook `fetch()` handler in `server.ts` is a single large dispatcher that handles all event types; its cyclomatic complexity scores ~40 after the dispatcher refactors in this codebase. Splitting it further would obscure the control flow. The threshold is set just above the real worst-offender score — if it ever exceeds 45, that's a signal to refactor.
+
 ## Security
 
 - HMAC-SHA256 verification uses `timingSafeEqual` — constant-time, no timing oracle
 - Fallback handler emits only `event + action + repo` — raw payload is never forwarded to Claude (prompt injection guard)
 - `GITHUB_TOKEN` is read-only (`actions:read` + `pull_requests:read`) — no write access needed
 - `.env` is gitignored — secrets stay local
-- Dev mode (no `GITHUB_WEBHOOK_SECRET`): all requests accepted, warning logged — never deploy without a secret
+- `GITHUB_WEBHOOK_SECRET` is **required** — omitting it causes all requests to be rejected; set `WEBHOOK_DEV_MODE=true` to bypass verification in local dev only
 
 See [AGENTS.md](AGENTS.md) for the full security analysis and architecture reference.
