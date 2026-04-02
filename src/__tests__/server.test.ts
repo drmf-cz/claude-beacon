@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   buildReviewNotification,
   isActionable,
+  isDuplicateDelivery,
   isInReviewCooldown,
+  isOversized,
   parseWorkflowEvent,
   pendingReviews,
   reviewCooldowns,
+  sanitizeBody,
   scheduleReviewNotification,
   verifySignature,
 } from "../server.js";
@@ -563,5 +566,54 @@ describe("isInReviewCooldown", () => {
     reviewCooldowns.set("x/y/1", Date.now() - 1);
     expect(isInReviewCooldown("x/y/1")).toBe(false);
     expect(reviewCooldowns.has("x/y/1")).toBe(false);
+  });
+});
+
+// ── isOversized ───────────────────────────────────────────────────────────────
+describe("isOversized", () => {
+  it("returns false for a normal-sized payload", () => {
+    expect(isOversized('{"action":"completed"}')).toBe(false);
+  });
+
+  it("returns true when body exceeds 25 KB", () => {
+    expect(isOversized("x".repeat(26 * 1024))).toBe(true);
+  });
+});
+
+// ── isDuplicateDelivery ───────────────────────────────────────────────────────
+describe("isDuplicateDelivery", () => {
+  it("returns false for a new delivery ID", () => {
+    expect(isDuplicateDelivery(`unique-id-${Date.now()}`)).toBe(false);
+  });
+
+  it("returns true for a repeated delivery ID", () => {
+    const id = `replay-${Math.random()}`;
+    isDuplicateDelivery(id);
+    expect(isDuplicateDelivery(id)).toBe(true);
+  });
+
+  it("returns false for an empty string", () => {
+    expect(isDuplicateDelivery("")).toBe(false);
+  });
+});
+
+// ── sanitizeBody ──────────────────────────────────────────────────────────────
+describe("sanitizeBody", () => {
+  it("removes null bytes", () => {
+    const nul = String.fromCharCode(0);
+    expect(sanitizeBody(`hello${nul}world`)).toBe("helloworld");
+  });
+
+  it("collapses newlines and tabs to a single space", () => {
+    expect(sanitizeBody("line1\nline2\ttab")).toBe("line1 line2 tab");
+  });
+
+  it("truncates to maxLen", () => {
+    expect(sanitizeBody("a".repeat(600))).toHaveLength(500);
+    expect(sanitizeBody("a".repeat(10), 5)).toHaveLength(5);
+  });
+
+  it("trims leading/trailing whitespace", () => {
+    expect(sanitizeBody("  hello  ")).toBe("hello");
   });
 });
