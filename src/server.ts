@@ -186,10 +186,14 @@ export function buildReviewNotification(
 
   lines.push(
     "",
-    "Act immediately — no confirmation needed.",
-    "Enter plan mode, then use the pr-comment-response skill to address each thread.",
+    "MANDATORY: Enter plan mode first.",
+    "1. Read every linked thread and summarise what each one asks for",
+    "2. Draft a plan listing the file + change for each thread",
+    "3. Only after the plan is complete, use the pr-comment-response skill to execute",
     "",
-    "Subagent instructions:",
+    "Do NOT apply any fix before the plan step is done.",
+    "",
+    "Subagent instructions (execution phase):",
     `1. For each comment thread above, open the link and read full context`,
     `2. Code comments: apply the fix in a worktree, commit`,
     `3. Questions / style: reply inline with a concise explanation`,
