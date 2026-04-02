@@ -221,7 +221,9 @@ export function verifySignature(payload: string, signature: string | null): bool
       log("WARNING: No GITHUB_WEBHOOK_SECRET set — skipping verification (WEBHOOK_DEV_MODE=true)");
       return true;
     }
-    log("ERROR: No GITHUB_WEBHOOK_SECRET configured — rejecting request (set WEBHOOK_DEV_MODE=true to bypass in dev)");
+    log(
+      "ERROR: No GITHUB_WEBHOOK_SECRET configured — rejecting request (set WEBHOOK_DEV_MODE=true to bypass in dev)",
+    );
     return false;
   }
   if (!signature) return false;
@@ -838,7 +840,9 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
               const notification = buildReviewNotification(evts, meta);
               try {
                 await sendChannelNotification(mcp, notification);
-                log(`PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`);
+                log(
+                  `PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`,
+                );
               } catch (err) {
                 log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
               }
