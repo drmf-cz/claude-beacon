@@ -1,0 +1,153 @@
+# github-ci-channel configuration
+#
+# All fields are optional — omitted fields keep their default values.
+# Pass this file at startup: npx @modelcontextprotocol/inspector --config ./my-config.yaml
+# Or via the mcp entry in .claude/settings.json:
+#   "args": ["run", "src/index.ts", "--config", "/path/to/config.yaml"]
+#
+# Environment variables still override YAML for server.port and server.debounce_ms.
+
+# ── Server ────────────────────────────────────────────────────────────────────
+server:
+  # HTTP port for the incoming GitHub webhook. Env override: WEBHOOK_PORT
+  port: 9443
+
+  # Milliseconds to wait after the first review event before firing the batched
+  # notification. Gives GitHub time to deliver all events from a single review
+  # session before Claude acts. Env override: REVIEW_DEBOUNCE_MS
+  debounce_ms: 30000
+
+  # Milliseconds to suppress further notifications for the same PR after one fires.
+  # Prevents duplicate responses when a reviewer leaves many comments.
+  cooldown_ms: 300000  # 5 minutes
+
+  # Maximum review events buffered per debounce window.
+  # Prevents unbounded memory growth on PR review storms.
+  max_events_per_window: 50
+
+  # Branch names treated as the production/default branch.
+  # CI failures on these branches trigger the escalated on_ci_failure_main instruction.
+  main_branches:
+    - main
+    - master
+
+# ── Webhook filters ───────────────────────────────────────────────────────────
+webhooks:
+  # Allowlist of GitHub event types to process.
+  # Empty list (default) means all supported events are processed.
+  # Useful for narrowing a shared webhook to only the events you care about.
+  #
+  # Supported values:
+  #   push, workflow_run, workflow_job, check_suite, check_run,
+  #   pull_request, pull_request_review, pull_request_review_comment,
+  #   pull_request_review_thread, issue_comment
+  allowed_events: []
+
+  # Allowlist of repositories (owner/repo) to process.
+  # Empty list (default) means all repositories posting to this webhook are handled.
+  # Example: only process two repos from a shared org webhook.
+  allowed_repos: []
+  # allowed_repos:
+  #   - myorg/frontend
+  #   - myorg/backend
+
+# ── Agent behaviour ───────────────────────────────────────────────────────────
+# Each section controls the instruction text appended to the channel notification
+# Claude receives. Edit these to match your project's workflow and conventions.
+#
+# Template placeholders use {name} syntax.
+# Unknown placeholders are left unchanged, so you can include literal braces
+# by using names that don't appear in the variable list for that event.
+behavior:
+
+  # Triggered when a workflow_run fails on a main/master branch.
+  # Placeholders: {repo}, {branch}, {run_url}, {workflow}, {status}, {commit}
+  on_ci_failure_main:
+    instruction: |
+      Main branch is broken. Act immediately — no confirmation needed.
+      Use the Agent tool NOW to spawn a subagent with these instructions:
+      Diagnose and fix the broken CI on main in {repo}:
+      1. Call fetch_workflow_logs("{run_url}") to read the failure
+      2. Identify the failing step and root cause
+      3. Apply a targeted fix in the codebase
+      4. Commit and push to restore main
+      5. Confirm CI is green.
+
+  # Triggered when a workflow_run fails on a non-main branch.
+  # Placeholders: {repo}, {branch}, {run_url}, {workflow}, {status}, {commit}
+  on_ci_failure_branch:
+    instruction: |
+      Act immediately — no confirmation needed.
+      Use the Agent tool NOW to spawn a subagent with these instructions:
+      Investigate the CI failure on branch {branch} in {repo}:
+      1. Call fetch_workflow_logs("{run_url}") to read the failure
+      2. Identify the root cause and fix it
+      3. Push the fix to the branch.
+
+  # Triggered when a PR review, inline comment, or unresolved thread arrives.
+  # Placeholder in instruction: {skill}  (replaced with the skill field below)
+  on_pr_review:
+    # When true, the instruction must direct the agent to enter plan mode
+    # before making any code changes. Strongly recommended.
+    require_plan: true
+
+    # Skill invoked during the execution phase.
+    skill: pr-comment-response
+
+    instruction: |
+      MANDATORY: Enter plan mode first.
+      1. Read every linked thread and summarise what each one asks for
+      2. Draft a plan listing the file + change for each thread
+      3. Only after the plan is complete, use the {skill} skill to execute
+
+      Do NOT apply any fix before the plan step is done.
+
+      Execution phase:
+      1. For each comment thread above, open the link and read full context
+      2. Code comments: apply the fix in a worktree, commit
+      3. Questions / style: reply inline with a concise explanation
+      4. Use gh-pr-reply.sh --batch to post all replies in one shot
+
+  # Triggered when a PR has merge conflicts (mergeable_state=dirty).
+  # Placeholders: {repo}, {pr_number}, {pr_title}, {pr_url}, {head_branch}, {base_branch}
+  on_merge_conflict:
+    instruction: |
+      PR #{pr_number} has merge conflicts with {base_branch}. Act immediately — no confirmation needed.
+
+      Use the Agent tool NOW to spawn a subagent with these instructions:
+      Resolve merge conflicts for PR #{pr_number} in {repo}:
+      1. git worktree add /tmp/pr-{pr_number}-rebase {head_branch}
+      2. cd /tmp/pr-{pr_number}-rebase && git fetch origin
+      3. git rebase origin/{base_branch} -- fix conflicts, then: git add -A && git rebase --continue
+      4. git push --force-with-lease origin {head_branch}
+      5. git worktree remove /tmp/pr-{pr_number}-rebase
+
+  # Triggered when a PR is behind its base branch (mergeable_state=behind).
+  # Placeholders: {repo}, {pr_number}, {pr_title}, {pr_url}, {head_branch}, {base_branch}
+  on_branch_behind:
+    instruction: |
+      PR #{pr_number} is behind {base_branch} (no conflicts). Act immediately — no confirmation needed.
+
+      Use the Agent tool NOW to spawn a subagent with these instructions:
+      Rebase PR #{pr_number} in {repo}:
+      1. git worktree add /tmp/pr-{pr_number}-rebase {head_branch}
+      2. cd /tmp/pr-{pr_number}-rebase && git fetch origin
+      3. git rebase origin/{base_branch}
+      4. git push --force-with-lease origin {head_branch}
+      5. git worktree remove /tmp/pr-{pr_number}-rebase
+
+# ── Code style guidelines ─────────────────────────────────────────────────────
+# Free-text block prepended to every PR review notification.
+# Use this to communicate project conventions so the agent applies them
+# when responding to review comments.
+#
+# Leave empty (default) to omit this section from notifications.
+code_style: ""
+
+# Example:
+# code_style: |
+#   - TypeScript strict mode; no `any`, no `!` assertions.
+#   - Prefer functional patterns; avoid class mutation.
+#   - All exported symbols must have JSDoc comments.
+#   - Tests go in src/__tests__/ as *.test.ts files using bun:test.
+#   - Format with Biome before committing.
