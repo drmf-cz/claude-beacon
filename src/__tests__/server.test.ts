@@ -575,8 +575,8 @@ describe("isOversized", () => {
     expect(isOversized('{"action":"completed"}')).toBe(false);
   });
 
-  it("returns true when body exceeds 25 KB", () => {
-    expect(isOversized("x".repeat(26 * 1024))).toBe(true);
+  it("returns true when body exceeds 10 MB", () => {
+    expect(isOversized("x".repeat(10 * 1024 * 1024 + 1))).toBe(true);
   });
 });
 

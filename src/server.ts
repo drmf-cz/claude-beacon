@@ -17,7 +17,7 @@ const MAX_LOG_CHARS = 8000;
 const MAIN_BRANCHES = new Set(["main", "master"]);
 
 // ── Security ──────────────────────────────────────────────────────────────────
-const MAX_BODY_BYTES = 25 * 1024; // 25 KB — GitHub webhook payloads are well under this
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — PR review payloads with diff context can exceed 100 KB
 /** Returns true if the raw body exceeds the allowed limit. */
 export function isOversized(body: string): boolean {
   return Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES;
