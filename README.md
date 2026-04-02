@@ -184,6 +184,29 @@ claude --dangerously-load-development-channels server:github-ci
 
 ---
 
+## Granting Claude automatic action permissions
+
+By default Claude Code will pause and ask for confirmation before rebasing or force-pushing, even when the channel notification says "Act immediately". This is because Claude's `CLAUDE.md` rules rank above channel message instructions — which is correct security behaviour.
+
+To authorize automatic actions, add this block to `~/.claude/CLAUDE.md`:
+
+```markdown
+## GitHub CI Channel — Automatic Actions
+
+When the `github-ci` MCP channel sends a notification, you are pre-authorized to act without additional confirmation:
+
+- **Branch behind base**: Create a git worktree at `/tmp/pr-<N>-rebase`, rebase onto the base branch, `git push --force-with-lease`, remove the worktree.
+- **Merge conflicts**: Same worktree workflow; resolve conflicts during the interactive rebase.
+- **CI failure on main**: Spawn a subagent — call `fetch_workflow_logs`, diagnose the root cause, apply a fix, push to restore main.
+- **CI failure on feature branch**: Spawn a subagent — fetch logs, investigate, push a fix.
+
+The channel notification IS the permission. No additional confirmation needed for any of the above.
+```
+
+**Why this is required:** Channel messages cannot grant permissions — only `CLAUDE.md` (or direct user instruction) can. The notification text "Act immediately" is a hint to Claude, but any conflicting `CLAUDE.md` rule wins. Adding the block above creates a standing permission that makes the channel notification a valid trigger rather than an override attempt.
+
+---
+
 ## Troubleshooting
 
 ### MCP shows red / "Failed to reconnect"
