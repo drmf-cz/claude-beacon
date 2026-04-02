@@ -712,7 +712,7 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         if (event === "pull_request_review" && payload.action === "submitted") {
           const review = payload.review as PRReview | undefined;
           const pr = payload.pull_request;
-          if (review && pr && (review.state as string) !== "pending") {
+          if (review && pr && review.state !== "pending") {
             reviewEvent = {
               type: "review",
               reviewer: review.user.login,
