@@ -649,7 +649,8 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         event === "issue_comment"
       ) {
         let reviewEvent: ReviewEventRecord | null = null;
-        let prMeta: { prNumber: number; prTitle: string; prUrl: string; repo: string } | null = null;
+        let prMeta: { prNumber: number; prTitle: string; prUrl: string; repo: string } | null =
+          null;
         const repo = payload.repository?.full_name ?? "unknown";
 
         if (event === "pull_request_review" && payload.action === "submitted") {
@@ -700,22 +701,29 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
 
         if (reviewEvent && prMeta) {
           const key = `${repo}/${prMeta.prNumber}`;
-          const accepted = scheduleReviewNotification(key, prMeta, reviewEvent, async (evts, meta) => {
-            const notification = buildReviewNotification(evts, meta);
-            try {
-              await mcp.server.notification({
-                method: "notifications/claude/channel",
-                params: {
-                  channel: "github-ci",
-                  content: notification.summary,
-                  meta: notification.meta,
-                },
-              });
-              log(`PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`);
-            } catch (err) {
-              log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
-            }
-          });
+          const accepted = scheduleReviewNotification(
+            key,
+            prMeta,
+            reviewEvent,
+            async (evts, meta) => {
+              const notification = buildReviewNotification(evts, meta);
+              try {
+                await mcp.server.notification({
+                  method: "notifications/claude/channel",
+                  params: {
+                    channel: "github-ci",
+                    content: notification.summary,
+                    meta: notification.meta,
+                  },
+                });
+                log(
+                  `PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`,
+                );
+              } catch (err) {
+                log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
+              }
+            },
+          );
           if (!accepted) log(`PR #${prMeta.prNumber} review event discarded (cooldown active)`);
         } else {
           log(`Skipping ${event}/${payload.action ?? ""} — not a PR review we act on`);

@@ -64,7 +64,6 @@ export interface PullRequest {
   user: { login: string };
 }
 
-
 export interface PRReview {
   id: number;
   user: { login: string };
