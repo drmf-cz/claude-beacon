@@ -75,3 +75,10 @@ export interface GitHubWebhookPayload {
   check_run?: CheckRun;
   pull_request?: PullRequest;
 }
+
+export interface GitHubPushPayload {
+  /** e.g. "refs/heads/main" */
+  ref: string;
+  repository: { full_name: string; default_branch: string };
+  sender: { login: string };
+}

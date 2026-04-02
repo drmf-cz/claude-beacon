@@ -67,8 +67,12 @@ describe("isActionable", () => {
     expect(isActionable("ping", { action: "completed" })).toBe(false);
   });
 
+  it("returns true for push event (triggers PR check)", () => {
+    expect(isActionable("push", {})).toBe(true);
+  });
+
   it("returns false for unknown event", () => {
-    expect(isActionable("push", { action: "completed" })).toBe(false);
+    expect(isActionable("deployment", { action: "completed" })).toBe(false);
   });
 });
 

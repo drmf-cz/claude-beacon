@@ -88,7 +88,8 @@ To get a stable URL: [Cloudflare named tunnels](https://developers.cloudflare.co
    - ✅ Workflow runs
    - ✅ Workflow jobs
    - ✅ Check suites
-   - ✅ Pull requests  ← required for merge conflict notifications
+   - ✅ Pull requests
+   - ✅ Pushes  ← required for detecting PRs that fall behind after a merge to main
 6. **Add webhook** — you should see a green ✓ ping response
 
 ### 5. Register with Claude Code

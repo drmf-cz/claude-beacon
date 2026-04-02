@@ -1,7 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CINotification, GitHubWebhookPayload, MergeableState } from "./types.js";
+import type {
+  CINotification,
+  GitHubPushPayload,
+  GitHubWebhookPayload,
+  MergeableState,
+} from "./types.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const PORT = Number.parseInt(process.env.WEBHOOK_PORT ?? "9443", 10);
@@ -230,6 +235,114 @@ export function parsePullRequestEvent(payload: GitHubWebhookPayload): CINotifica
   return null;
 }
 
+// ── Push → PR Behind Detection ────────────────────────────────────────────────
+
+async function fetchPRMergeableState(
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<MergeableState> {
+  const resp = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!resp.ok) return "unknown";
+  const pr = (await resp.json()) as { mergeable_state: MergeableState };
+  return pr.mergeable_state;
+}
+
+/**
+ * Called when a push lands on a default branch.
+ * Lists open PRs targeting that branch and emits notifications for any that
+ * are now `behind` or `dirty`. Responds to GitHub immediately; this runs async.
+ *
+ * GitHub computes mergeability asynchronously after a push — we retry once
+ * after a short delay if the state is still `unknown`.
+ */
+export async function checkPRsAfterPush(
+  repo: string,
+  baseBranch: string,
+  token: string,
+  mcp: McpServer,
+): Promise<void> {
+  // Give GitHub a moment to start computing mergeability
+  await new Promise<void>((r) => setTimeout(r, 4_000));
+
+  const resp = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=open&base=${baseBranch}&per_page=20`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+
+  if (!resp.ok) {
+    log(`PR list fetch failed: ${resp.status}`);
+    return;
+  }
+
+  const prs = (await resp.json()) as Array<{
+    number: number;
+    title: string;
+    html_url: string;
+    head: { ref: string };
+    base: { ref: string };
+    user: { login: string };
+    mergeable_state: MergeableState;
+  }>;
+
+  for (const pr of prs) {
+    let state = pr.mergeable_state;
+
+    // Retry once if GitHub hasn't finished computing yet
+    if (state === "unknown") {
+      await new Promise<void>((r) => setTimeout(r, 5_000));
+      state = await fetchPRMergeableState(repo, pr.number, token);
+    }
+
+    if (state !== "dirty" && state !== "behind") continue;
+
+    const notification = parsePullRequestEvent({
+      action: "synchronize",
+      pull_request: {
+        number: pr.number,
+        title: pr.title,
+        state: "open",
+        html_url: pr.html_url,
+        head: { ref: pr.head.ref, sha: "" },
+        base: { ref: pr.base.ref, sha: "" },
+        mergeable: state !== "dirty",
+        mergeable_state: state,
+        user: pr.user,
+      },
+      repository: { full_name: repo },
+      sender: pr.user,
+    });
+
+    if (!notification) continue;
+
+    log(`PR #${pr.number} is ${state} — notifying Claude`);
+    try {
+      await mcp.server.notification({
+        method: "notifications/claude/channel",
+        params: {
+          channel: "github-ci",
+          content: notification.summary,
+          meta: notification.meta,
+        },
+      });
+    } catch (err) {
+      log(`Failed to notify for PR #${pr.number}:`, err);
+    }
+  }
+}
+
 // ── Actionable Event Filter ───────────────────────────────────────────────────
 export function isActionable(event: string, payload: GitHubWebhookPayload): boolean {
   if (event === "ping") return false;
@@ -242,6 +355,8 @@ export function isActionable(event: string, payload: GitHubWebhookPayload): bool
       (state === "dirty" || state === "behind")
     );
   }
+
+  if (event === "push") return true; // handled separately — no action field
 
   const completedEvents = ["workflow_run", "workflow_job", "check_suite", "check_run"];
   return completedEvents.includes(event) && payload.action === "completed";
@@ -355,6 +470,17 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
       }
 
       log(`Received: ${event} (${payload.action ?? "no action"}) delivery=${deliveryId}`);
+
+      if (event === "push") {
+        const push = JSON.parse(body) as GitHubPushPayload;
+        const branch = push.ref.replace("refs/heads/", "");
+        const token = process.env.GITHUB_TOKEN;
+        if (MAIN_BRANCHES.has(branch) && token) {
+          log(`Push to ${branch} — checking open PRs for merge status`);
+          void checkPRsAfterPush(push.repository.full_name, branch, token, mcp);
+        }
+        return new Response("OK", { status: 200 });
+      }
 
       if (!isActionable(event, payload)) {
         log(`Skipping non-actionable event: ${event}/${payload.action ?? ""}`);
