@@ -341,7 +341,7 @@ describe("parseWorkflowEvent — main branch escalation", () => {
     };
     const result = parseWorkflowEvent("workflow_run", payload);
     expect(result?.summary).toContain("Main branch is broken");
-    expect(result?.summary).toContain("Spawn a subagent");
+    expect(result?.summary).toContain("Agent tool NOW");
   });
 
   it("does not escalate for failures on feature branches", () => {
@@ -362,6 +362,6 @@ describe("parseWorkflowEvent — main branch escalation", () => {
     };
     const result = parseWorkflowEvent("workflow_run", payload);
     expect(result?.summary).not.toContain("Main branch is broken");
-    expect(result?.summary).toContain("Spawn a subagent");
+    expect(result?.summary).toContain("Agent tool NOW");
   });
 });
