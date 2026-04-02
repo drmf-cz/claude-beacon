@@ -60,20 +60,12 @@ cd claude-code-github-ci-channel
 bun install
 ```
 
-### 2. Create `.env`
+### 2. Generate a webhook secret
 
 ```bash
-cp .env.example .env
-# Edit .env — fill in GITHUB_WEBHOOK_SECRET and GITHUB_TOKEN
+openssl rand -hex 32
+# → e.g. a3f2c1d4e5b6...  save this, you'll need it in two places
 ```
-
-```ini
-WEBHOOK_PORT=9443
-GITHUB_WEBHOOK_SECRET=          # generate: openssl rand -hex 32
-GITHUB_TOKEN=                   # PAT with repo + actions:read
-```
-
-> **Important:** the values in `.env` and in your GitHub webhook settings **must match exactly**. A mismatch causes all webhooks to return 401.
 
 ### 3. Start the tunnel
 
@@ -111,13 +103,15 @@ Create or update `.mcp.json` (project-level) or `~/.mcp.json` (global):
       "args": ["run", "/path/to/claude-code-github-ci-channel/src/index.ts"],
       "env": {
         "WEBHOOK_PORT": "9443",
-        "GITHUB_WEBHOOK_SECRET": "your-secret",
+        "GITHUB_WEBHOOK_SECRET": "your-secret-from-step-2",
         "GITHUB_TOKEN": "ghp_your_token"
       }
     }
   }
 }
 ```
+
+> The `env` block in `.mcp.json` **is the config** — Claude Code passes these directly to the subprocess. You do not need a `.env` file. If a `.env` file exists in the repo directory, Bun loads it too, but `.mcp.json` env values take precedence. Keep them in sync to avoid confusion.
 
 Use the **full path** to `bun` — Claude Code spawns processes without your shell PATH. Find it with `which bun`.
 
