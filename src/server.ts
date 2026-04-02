@@ -543,3 +543,20 @@ const MAX_BODY_BYTES = 25 * 1024; // 25 KB — GitHub webhook payloads are well 
 export function isOversized(body: string): boolean {
   return Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES;
 }
+
+// ── Webhook Rate Limiting ─────────────────────────────────────────────────────
+// Simple in-memory sliding window to drop duplicate deliveries and burst floods.
+const deliveryWindow = new Map<string, number>();
+const DEDUP_TTL_MS = 60_000;
+
+/** Returns true if this delivery ID has been seen within the last 60 s. */
+export function isDuplicateDelivery(deliveryId: string): boolean {
+  const now = Date.now();
+  // Evict stale entries
+  for (const [id, ts] of deliveryWindow) {
+    if (now - ts > DEDUP_TTL_MS) deliveryWindow.delete(id);
+  }
+  if (deliveryWindow.has(deliveryId)) return true;
+  deliveryWindow.set(deliveryId, now);
+  return false;
+}
