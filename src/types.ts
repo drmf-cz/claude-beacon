@@ -38,6 +38,19 @@ export interface CheckRun {
   app?: { name: string };
 }
 
+/**
+ * GitHub's computed merge status for a pull request.
+ * GitHub sets this asynchronously — always check for "unknown" before acting.
+ */
+export type MergeableState =
+  | "clean" // can merge without conflicts
+  | "dirty" // merge conflicts exist
+  | "behind" // branch is behind base, needs rebase (no conflicts)
+  | "blocked" // branch protection rules not satisfied
+  | "unstable" // CI failing but not a required check
+  | "has_hooks" // webhooks are being processed
+  | "unknown"; // GitHub is still computing — do not act yet
+
 export interface PullRequest {
   number: number;
   title: string;
@@ -47,15 +60,7 @@ export interface PullRequest {
   base: { ref: string; sha: string };
   /** null while GitHub is computing mergeability */
   mergeable: boolean | null;
-  /**
-   * clean    — can merge
-   * dirty    — merge conflicts
-   * behind   — branch is behind base (needs rebase)
-   * blocked  — branch protection rules not satisfied
-   * unstable — CI failing but not blocking
-   * unknown  — GitHub still computing
-   */
-  mergeable_state: string;
+  mergeable_state: MergeableState;
   user: { login: string };
 }
 

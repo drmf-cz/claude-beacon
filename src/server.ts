@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CINotification, GitHubWebhookPayload } from "./types.js";
+import type { CINotification, GitHubWebhookPayload, MergeableState } from "./types.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const PORT = Number.parseInt(process.env.WEBHOOK_PORT ?? "9443", 10);
@@ -154,10 +154,10 @@ export function parseWorkflowEvent(
     };
   }
 
-  // Fallback for unknown events
+  // Fallback for unknown events — do NOT include raw payload (prompt injection risk)
   return {
-    summary: `GitHub event "${event}": ${JSON.stringify(payload).slice(0, MAX_LOG_CHARS)}`,
-    meta: { source: "github-ci", event, action: payload.action ?? "" },
+    summary: `GitHub event "${event}" (action: ${payload.action ?? "none"}) on ${repo}`,
+    meta: { source: "github-ci", event, action: payload.action ?? "", repo },
   };
 }
 
@@ -166,7 +166,7 @@ export function parsePullRequestEvent(payload: GitHubWebhookPayload): CINotifica
   if (!pr) return null;
 
   const repo = payload.repository?.full_name ?? "unknown";
-  const state = pr.mergeable_state;
+  const state: MergeableState = pr.mergeable_state;
 
   if (state === "dirty") {
     return {
