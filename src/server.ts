@@ -251,6 +251,72 @@ function formatDuration(startedAt: string | null, updatedAt: string | null): str
 }
 
 // ── Event Parsing ─────────────────────────────────────────────────────────────
+function parseWorkflowRunEvent(
+  event: string,
+  payload: GitHubWebhookPayload,
+  repo: string,
+): CINotification | null {
+  const run = payload.workflow_run;
+  if (!run) return null;
+
+  const status = run.conclusion ?? run.status;
+  const emoji = statusEmoji(run.conclusion);
+  const commitMsg = run.head_commit?.message?.split("\n")[0] ?? "";
+  const duration = formatDuration(run.run_started_at, run.updated_at);
+  const isMainBranch = MAIN_BRANCHES.has(run.head_branch);
+
+  const lines = [
+    `${emoji} CI ${status.toUpperCase()}: ${run.name} on ${repo}`,
+    `Branch: ${run.head_branch} | Commit: "${commitMsg}"`,
+    `Duration: ${duration} | Run #${run.run_number}`,
+    `URL: ${run.html_url}`,
+  ];
+
+  if (status === "failure") {
+    lines.push("", "Fetch logs and diagnose:", `  fetch_workflow_logs("${run.html_url}")`);
+
+    if (isMainBranch) {
+      lines.push(
+        "",
+        "🚨 Main branch is broken. Act immediately — no confirmation needed.",
+        "Use the Agent tool NOW to spawn a subagent with these instructions:",
+        `Diagnose and fix the broken CI on main in ${repo}:`,
+        `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
+        "2. Identify the failing step and root cause",
+        "3. Apply a targeted fix in the codebase",
+        "4. Commit and push to restore main",
+        "5. Confirm CI is green.",
+      );
+    } else {
+      lines.push(
+        "",
+        "Act immediately — no confirmation needed.",
+        "Use the Agent tool NOW to spawn a subagent with these instructions:",
+        `Investigate the CI failure on branch ${run.head_branch} in ${repo}:`,
+        `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
+        "2. Identify the root cause and fix it",
+        "3. Push the fix to the branch.",
+      );
+    }
+  }
+
+  return {
+    summary: lines.join("\n"),
+    meta: {
+      source: "github-ci",
+      event,
+      action: payload.action ?? "",
+      repo,
+      branch: run.head_branch,
+      status,
+      workflow: run.name,
+      run_url: run.html_url,
+      run_id: String(run.id ?? ""),
+      sender: payload.sender?.login ?? "",
+    },
+  };
+}
+
 export function parseWorkflowEvent(
   event: string,
   payload: GitHubWebhookPayload,
@@ -258,65 +324,7 @@ export function parseWorkflowEvent(
   const repo = payload.repository?.full_name ?? "unknown";
 
   if (event === "workflow_run") {
-    const run = payload.workflow_run;
-    if (!run) return null;
-
-    const status = run.conclusion ?? run.status;
-    const emoji = statusEmoji(run.conclusion);
-    const commitMsg = run.head_commit?.message?.split("\n")[0] ?? "";
-    const duration = formatDuration(run.run_started_at, run.updated_at);
-    const isMainBranch = MAIN_BRANCHES.has(run.head_branch);
-
-    const lines = [
-      `${emoji} CI ${status.toUpperCase()}: ${run.name} on ${repo}`,
-      `Branch: ${run.head_branch} | Commit: "${commitMsg}"`,
-      `Duration: ${duration} | Run #${run.run_number}`,
-      `URL: ${run.html_url}`,
-    ];
-
-    if (status === "failure") {
-      lines.push("", "Fetch logs and diagnose:", `  fetch_workflow_logs("${run.html_url}")`);
-
-      if (isMainBranch) {
-        lines.push(
-          "",
-          "🚨 Main branch is broken. Act immediately — no confirmation needed.",
-          "Use the Agent tool NOW to spawn a subagent with these instructions:",
-          `Diagnose and fix the broken CI on main in ${repo}:`,
-          `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
-          "2. Identify the failing step and root cause",
-          "3. Apply a targeted fix in the codebase",
-          "4. Commit and push to restore main",
-          "5. Confirm CI is green.",
-        );
-      } else {
-        lines.push(
-          "",
-          "Act immediately — no confirmation needed.",
-          "Use the Agent tool NOW to spawn a subagent with these instructions:",
-          `Investigate the CI failure on branch ${run.head_branch} in ${repo}:`,
-          `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
-          "2. Identify the root cause and fix it",
-          "3. Push the fix to the branch.",
-        );
-      }
-    }
-
-    return {
-      summary: lines.join("\n"),
-      meta: {
-        source: "github-ci",
-        event,
-        action: payload.action ?? "",
-        repo,
-        branch: run.head_branch,
-        status,
-        workflow: run.name,
-        run_url: run.html_url,
-        run_id: String(run.id ?? ""),
-        sender: payload.sender?.login ?? "",
-      },
-    };
+    return parseWorkflowRunEvent(event, payload, repo);
   }
 
   if (event === "workflow_job") {
@@ -559,6 +567,90 @@ export async function checkPRsAfterPush(
   }
 }
 
+type ReviewPayload = {
+  reviewEvent: ReviewEventRecord;
+  prMeta: { prNumber: number; prTitle: string; prUrl: string; repo: string };
+};
+
+/**
+ * Parse a PR review / comment webhook payload into a ReviewEventRecord + PR metadata.
+ * Returns null for events we do not act on.
+ */
+export function parseReviewWebhookPayload(
+  event: string,
+  action: string | undefined,
+  payload: GitHubWebhookPayload,
+): ReviewPayload | null {
+  const repo = payload.repository?.full_name ?? "unknown";
+
+  if (event === "pull_request_review" && action === "submitted") {
+    const review = payload.review as PRReview | undefined;
+    const pr = payload.pull_request;
+    if (!review || !pr || review.state === "pending") return null;
+    return {
+      reviewEvent: {
+        type: "review",
+        reviewer: review.user.login,
+        state: review.state,
+        body: sanitizeBody(review.body ?? "(no review body)"),
+        url: review.html_url,
+      },
+      prMeta: { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo },
+    };
+  }
+
+  if (event === "pull_request_review_comment" && action === "created") {
+    const comment = payload.comment as PRReviewComment | undefined;
+    const pr = payload.pull_request;
+    if (!comment || !pr) return null;
+    return {
+      reviewEvent: {
+        type: "review_comment",
+        reviewer: comment.user.login,
+        body: sanitizeBody(comment.body),
+        url: comment.html_url,
+        path: comment.path,
+      },
+      prMeta: { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo },
+    };
+  }
+
+  if (event === "issue_comment" && action === "created") {
+    const comment = payload.comment as IssueComment | undefined;
+    const issue = payload.issue;
+    // issue_comment also fires on plain issues — only act on PR comments
+    if (!comment || !issue?.pull_request) return null;
+    return {
+      reviewEvent: {
+        type: "issue_comment",
+        reviewer: comment.user.login,
+        body: sanitizeBody(comment.body),
+        url: comment.html_url,
+      },
+      prMeta: { prNumber: issue.number, prTitle: issue.title, prUrl: issue.html_url, repo },
+    };
+  }
+
+  if (event === "pull_request_review_thread" && action === "unresolved") {
+    const thread = payload.thread;
+    const pr = payload.pull_request;
+    const firstComment = thread?.comments[0];
+    if (!thread || !pr || !firstComment) return null;
+    return {
+      reviewEvent: {
+        type: "unresolved_thread",
+        reviewer: payload.sender?.login ?? firstComment.user.login,
+        body: sanitizeBody(firstComment.body),
+        url: firstComment.html_url,
+        path: firstComment.path,
+      },
+      prMeta: { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo },
+    };
+  }
+
+  return null;
+}
+
 // ── Actionable Event Filter ───────────────────────────────────────────────────
 export function isActionable(event: string, payload: GitHubWebhookPayload): boolean {
   if (event === "ping") return false;
@@ -648,6 +740,29 @@ export function createMcpServer(): McpServer {
   return mcp;
 }
 
+async function sendChannelNotification(
+  mcp: McpServer,
+  notification: CINotification,
+): Promise<Response | null> {
+  try {
+    await mcp.server.notification({
+      method: "notifications/claude/channel",
+      params: {
+        channel: "github-ci",
+        content: notification.summary,
+        meta: notification.meta,
+      },
+    });
+    log(
+      `Pushed to Claude: ${notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
+    );
+    return null;
+  } catch (err) {
+    log("Failed to send notification:", err);
+    return new Response("Notification failed", { status: 500 });
+  }
+}
+
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────
 export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve> {
   return Bun.serve({
@@ -717,73 +832,10 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         event === "pull_request_review_thread" ||
         event === "issue_comment"
       ) {
-        let reviewEvent: ReviewEventRecord | null = null;
-        let prMeta: { prNumber: number; prTitle: string; prUrl: string; repo: string } | null =
-          null;
-        const repo = payload.repository?.full_name ?? "unknown";
-
-        if (event === "pull_request_review" && payload.action === "submitted") {
-          const review = payload.review as PRReview | undefined;
-          const pr = payload.pull_request;
-          if (review && pr && review.state !== "pending") {
-            reviewEvent = {
-              type: "review",
-              reviewer: review.user.login,
-              state: review.state,
-              body: sanitizeBody(review.body ?? "(no review body)"),
-              url: review.html_url,
-            };
-            prMeta = { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo };
-          }
-        } else if (event === "pull_request_review_comment" && payload.action === "created") {
-          const comment = payload.comment as PRReviewComment | undefined;
-          const pr = payload.pull_request;
-          if (comment && pr) {
-            reviewEvent = {
-              type: "review_comment",
-              reviewer: comment.user.login,
-              body: sanitizeBody(comment.body),
-              url: comment.html_url,
-              path: comment.path,
-            };
-            prMeta = { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo };
-          }
-        } else if (event === "issue_comment" && payload.action === "created") {
-          const comment = payload.comment as IssueComment | undefined;
-          const issue = payload.issue;
-          // Only act on PR comments — issue_comment also fires on plain issues
-          if (comment && issue?.pull_request) {
-            reviewEvent = {
-              type: "issue_comment",
-              reviewer: comment.user.login,
-              body: sanitizeBody(comment.body),
-              url: comment.html_url,
-            };
-            prMeta = {
-              prNumber: issue.number,
-              prTitle: issue.title,
-              prUrl: issue.html_url,
-              repo,
-            };
-          }
-        } else if (event === "pull_request_review_thread" && payload.action === "unresolved") {
-          const thread = payload.thread;
-          const pr = payload.pull_request;
-          // Use the thread's first comment as the representative entry
-          const firstComment = thread?.comments[0];
-          if (thread && pr && firstComment) {
-            reviewEvent = {
-              type: "unresolved_thread",
-              reviewer: payload.sender?.login ?? firstComment.user.login,
-              body: sanitizeBody(firstComment.body),
-              url: firstComment.html_url,
-              path: firstComment.path,
-            };
-            prMeta = { prNumber: pr.number, prTitle: pr.title, prUrl: pr.html_url, repo };
-          }
-        }
-
-        if (reviewEvent && prMeta) {
+        const parsed = parseReviewWebhookPayload(event, payload.action, payload);
+        if (parsed) {
+          const { reviewEvent, prMeta } = parsed;
+          const repo = prMeta.repo;
           const key = `${repo}/${prMeta.prNumber}`;
           const accepted = scheduleReviewNotification(
             key,
@@ -829,23 +881,8 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         return new Response("Unparseable", { status: 200 });
       }
 
-      try {
-        await mcp.server.notification({
-          method: "notifications/claude/channel",
-          params: {
-            channel: "github-ci",
-            content: notification.summary,
-            meta: notification.meta,
-          },
-        });
-        log(
-          `Pushed to Claude: ${notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
-        );
-      } catch (err) {
-        log("Failed to send notification:", err);
-        return new Response("Notification failed", { status: 500 });
-      }
-
+      const errResp = await sendChannelNotification(mcp, notification);
+      if (errResp) return errResp;
       return new Response("OK", { status: 200 });
     },
   });
