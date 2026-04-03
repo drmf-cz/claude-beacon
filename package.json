@@ -6,6 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "start": "bun run src/index.ts",
+    "start:hub": "bun run src/hub.ts",
+    "start:relay": "bun run src/relay.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/",

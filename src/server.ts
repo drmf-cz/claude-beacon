@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Config } from "./config.js";
 import { DEFAULT_CONFIG, interpolate } from "./config.js";
+import type { NotifyFn, RoutingKey } from "./hub-protocol.js";
 import type {
   CINotification,
   GitHubPushPayload,
@@ -473,7 +474,7 @@ export async function checkPRsAfterPush(
   repo: string,
   baseBranch: string,
   token: string,
-  mcp: McpServer,
+  notify: NotifyFn,
   config: Config = DEFAULT_CONFIG,
 ): Promise<void> {
   // Give GitHub a moment to start computing mergeability
@@ -543,7 +544,7 @@ export async function checkPRsAfterPush(
 
     log(`PR #${pr.number} is ${state} — notifying Claude`);
     try {
-      await sendChannelNotification(mcp, notification);
+      await notify(notification, { repo, branch: pr.head.ref });
     } catch (err) {
       log(`Failed to notify for PR #${pr.number}:`, err);
     }
@@ -723,7 +724,7 @@ export function createMcpServer(): McpServer {
   return mcp;
 }
 
-async function sendChannelNotification(
+export async function sendChannelNotification(
   mcp: McpServer,
   notification: CINotification,
 ): Promise<void> {
@@ -738,6 +739,36 @@ async function sendChannelNotification(
   log(
     `Pushed to Claude: ${notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
   );
+}
+
+/**
+ * Extract a routing key from a raw webhook event so the hub knows which
+ * relay sessions should receive the resulting notification.
+ *
+ * - workflow_run  → branch the run executed on
+ * - pull_request / review events → PR head branch
+ * - push         → pushed branch (but push events are handled separately
+ *                  because they trigger async PR-status checks)
+ * - everything else → broadcast (branch = null)
+ */
+export function extractEventRouting(event: string, payload: GitHubWebhookPayload): RoutingKey {
+  const repo = payload.repository?.full_name ?? "unknown";
+
+  if (event === "workflow_run") {
+    return { repo, branch: payload.workflow_run?.head_branch ?? null };
+  }
+
+  if (
+    event === "pull_request" ||
+    event === "pull_request_review" ||
+    event === "pull_request_review_comment" ||
+    event === "pull_request_review_thread" ||
+    event === "issue_comment"
+  ) {
+    return { repo, branch: payload.pull_request?.head.ref ?? null };
+  }
+
+  return { repo, branch: null };
 }
 
 /** Returns a skip response if the event or repo is not in the configured allowlists, null otherwise. */
@@ -765,8 +796,16 @@ function applyWebhookFilters(
 }
 
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────
+
+/**
+ * Start the HTTP webhook receiver.
+ *
+ * @param notify  Called for every actionable event. In standalone mode this
+ *                pushes to the embedded MCP session; in hub mode it routes to
+ *                connected relay processes.
+ */
 export function startWebhookServer(
-  mcp: McpServer,
+  notify: NotifyFn,
   config: Config = DEFAULT_CONFIG,
 ): ReturnType<typeof Bun.serve> {
   return Bun.serve({
@@ -829,7 +868,7 @@ export function startWebhookServer(
         const mainBranches = new Set(config.server.main_branches);
         if (mainBranches.has(branch) && token) {
           log(`Push to ${branch} — checking open PRs for merge status`);
-          void checkPRsAfterPush(push.repository.full_name, branch, token, mcp, config);
+          void checkPRsAfterPush(push.repository.full_name, branch, token, notify, config);
         }
         return new Response("OK", { status: 200 });
       }
@@ -846,6 +885,7 @@ export function startWebhookServer(
           const { reviewEvent, prMeta } = parsed;
           const repo = prMeta.repo;
           const key = `${repo}/${prMeta.prNumber}`;
+          const routing = extractEventRouting(event, payload);
           const accepted = scheduleReviewNotification(
             key,
             prMeta,
@@ -853,7 +893,7 @@ export function startWebhookServer(
             async (evts, meta) => {
               const notification = buildReviewNotification(evts, meta, config);
               try {
-                await sendChannelNotification(mcp, notification);
+                await notify(notification, routing);
                 log(
                   `PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`,
                 );
@@ -888,8 +928,9 @@ export function startWebhookServer(
         return new Response("Unparseable", { status: 200 });
       }
 
+      const routing = extractEventRouting(event, payload);
       try {
-        await sendChannelNotification(mcp, notification);
+        await notify(notification, routing);
       } catch (err) {
         log("Failed to send notification:", err);
         return new Response("Notification failed", { status: 500 });
