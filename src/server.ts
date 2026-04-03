@@ -64,8 +64,7 @@ export function isDuplicateDelivery(id: string): boolean {
  */
 export function sanitizeBody(body: string, maxLen = 500): string {
   return body
-    .split(String.fromCharCode(0)) // strip null bytes
-    .join("")
+    .replaceAll("\x00", "") // strip null bytes
     .replace(/[\r\n\t]+/g, " ") // collapse runs of whitespace
     .trim()
     .slice(0, maxLen);
@@ -757,8 +756,8 @@ export async function sendChannelNotification(
 }
 
 /**
- * Extract a routing key from a raw webhook event so the hub knows which
- * relay sessions should receive the resulting notification.
+ * Extract a routing key from a raw webhook event so the mux knows which
+ * sessions should receive the resulting notification.
  *
  * - workflow_run  → branch the run executed on
  * - pull_request / review events → PR head branch
@@ -816,8 +815,8 @@ function applyWebhookFilters(
  * Start the HTTP webhook receiver.
  *
  * @param notify  Called for every actionable event. In standalone mode this
- *                pushes to the embedded MCP session; in hub mode it routes to
- *                connected relay processes.
+ *                pushes to the embedded MCP session; in mux mode it routes to
+ *                connected HTTP sessions.
  */
 export function startWebhookServer(
   notify: NotifyFn,
