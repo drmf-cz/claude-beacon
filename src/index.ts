@@ -25,6 +25,20 @@ if (configPath) {
   }
 }
 
+// ── Startup validation ────────────────────────────────────────────────────────
+if (config.webhooks.allowed_authors.length === 0) {
+  log(
+    "ERROR: webhooks.allowed_authors is required and must not be empty.",
+    "\nAdd your GitHub username (and optionally your email for co-author matching via bots like Devin).",
+    "\nExample config.yaml:",
+    "\n  webhooks:",
+    "\n    allowed_authors:",
+    "\n      - YourGitHubUsername",
+    "\n      - you@company.com  # for Co-Authored-By matching",
+  );
+  process.exit(1);
+}
+
 // ── Server startup ────────────────────────────────────────────────────────────
 const mcp = createMcpServer();
 
