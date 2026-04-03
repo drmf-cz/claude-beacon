@@ -70,9 +70,24 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Check NPM_TOKEN is set
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not configured."
+            echo "::error::Go to repo Settings → Secrets and variables → Actions → New repository secret"
+            echo "::error::Name: NPM_TOKEN  Value: your npm token (npm token create --access=public)"
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish to npm
         if: ${{ !inputs.dry_run }}
-        run: npm publish --access public --provenance
+        run: |
+          # --provenance requires OIDC (id-token: write) — available when triggered by tag push.
+          # workflow_dispatch also has id-token: write here, so provenance works for both triggers.
+          npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
