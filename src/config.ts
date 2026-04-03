@@ -275,7 +275,8 @@ export function buildWorktreePreamble(useWorktree: boolean): string {
 
 /** Replace {key} placeholders in a template string. Unknown placeholders are left unchanged. */
 export function interpolate(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match);
+  var result = template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match)
+  return result
 }
 
 // ── Deep Merge ────────────────────────────────────────────────────────────────
