@@ -1099,12 +1099,8 @@ export function startWebhookServer(
           : parseWorkflowEvent(event, payload, config);
 
       if (!notification) {
-<<<<<<< HEAD
-        // Actionable event type but no notification produced (e.g. success filtered out)
-=======
         // parse functions log the specific reason — this is just the outer guard
         log(`[skip] ${event}/${payload.action ?? "?"}: parse returned null (see reason above)`);
->>>>>>> ba6dcd7 (feat: add [skip] debug logs explaining why events are not notified)
         return new Response("OK", { status: 200 });
       }
 
