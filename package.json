@@ -1,12 +1,12 @@
 {
-  "name": "claude-code-github-ci-channel",
-  "version": "0.1.0",
+  "name": "claude-beacon",
+  "version": "1.0.0",
   "description": "Claude Code MCP channel plugin — pushes GitHub Actions CI/CD results into running Claude Code sessions",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "github-ci": "dist/index.js",
-    "github-ci-mux": "dist/mux.js"
+    "claude-beacon": "dist/index.js",
+    "claude-beacon-mux": "dist/mux.js"
   },
   "files": [
     "dist/",
@@ -50,10 +50,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/drmf-cz/claude-code-github-ci-channel.git"
+    "url": "git+https://github.com/drmf-cz/claude-beacon.git"
   },
-  "homepage": "https://github.com/drmf-cz/claude-code-github-ci-channel#readme",
+  "homepage": "https://github.com/drmf-cz/claude-beacon#readme",
   "bugs": {
-    "url": "https://github.com/drmf-cz/claude-code-github-ci-channel/issues"
+    "url": "https://github.com/drmf-cz/claude-beacon/issues"
   }
 }

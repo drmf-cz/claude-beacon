@@ -1,7 +1,7 @@
-# claude-code-github-ci-channel
+# claude-beacon
 
-[![CI](https://github.com/drmf-cz/claude-code-github-ci-channel/actions/workflows/ci.yml/badge.svg)](https://github.com/drmf-cz/claude-code-github-ci-channel/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/claude-code-github-ci-channel.svg)](https://www.npmjs.com/package/claude-code-github-ci-channel)
+[![CI](https://github.com/drmf-cz/claude-beacon/actions/workflows/ci.yml/badge.svg)](https://github.com/drmf-cz/claude-beacon/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/claude-beacon.svg)](https://www.npmjs.com/package/claude-beacon)
 
 > MCP channel plugin that pushes GitHub Actions CI/CD results and PR merge status directly into running Claude Code sessions — triggering automatic investigation and remediation.
 
@@ -68,22 +68,22 @@ The MCP server is started automatically by Claude Code as a subprocess — you n
 No cloning required. Install once with Bun:
 
 ```bash
-bun add -g claude-code-github-ci-channel
+bun add -g claude-beacon
 ```
 
 This puts two binaries in `~/.bun/bin/`:
 
 | Binary | Purpose |
 |---|---|
-| `github-ci` | Standalone MCP server — spawned as subprocess by Claude Code (single session) |
-| `github-ci-mux` | Mux server — run once, connects all Claude Code sessions via HTTP |
+| `claude-beacon` | Standalone MCP server — spawned as subprocess by Claude Code (single session) |
+| `claude-beacon-mux` | Mux server — run once, connects all Claude Code sessions via HTTP |
 
-To update to a newer version: `bun add -g claude-code-github-ci-channel@latest`
+To update to a newer version: `bun add -g claude-beacon@latest`
 
 > **No global install?** You can also run directly with `bunx`:
 > ```bash
-> bunx claude-code-github-ci-channel        # standalone (github-ci)
-> bunx -p claude-code-github-ci-channel github-ci-mux   # mux
+> bunx claude-beacon                    # standalone
+> bunx -p claude-beacon claude-beacon-mux   # mux
 > ```
 
 ## Setup (Option A — Webhook + Tunnel)
@@ -93,14 +93,14 @@ Real-time. Supports all event types including `workflow_job`, `check_suite`, and
 ### 1. Install
 
 ```bash
-bun add -g claude-code-github-ci-channel
+bun add -g claude-beacon
 ```
 
 Or clone if you want to hack on the source:
 
 ```bash
-git clone https://github.com/drmf-cz/claude-code-github-ci-channel
-cd claude-code-github-ci-channel
+git clone https://github.com/drmf-cz/claude-beacon
+cd claude-beacon
 bun install
 ```
 
@@ -148,8 +148,8 @@ Create or edit `~/.mcp.json` (all projects) or `.mcp.json` in your project root.
 ```json
 {
   "mcpServers": {
-    "github-ci": {
-      "command": "/home/you/.bun/bin/github-ci",
+    "claude-beacon": {
+      "command": "/home/you/.bun/bin/claude-beacon",
       "env": {
         "GITHUB_WEBHOOK_SECRET": "your-secret-from-step-2",
         "GITHUB_TOKEN": "your-pat"
@@ -166,9 +166,9 @@ Replace `/home/you` with your home directory (`echo $HOME`). Bun installs global
 ```json
 {
   "mcpServers": {
-    "github-ci": {
+    "claude-beacon": {
       "command": "/home/you/.bun/bin/bunx",
-      "args": ["claude-code-github-ci-channel"],
+      "args": ["claude-beacon"],
       "env": {
         "GITHUB_WEBHOOK_SECRET": "your-secret-from-step-2",
         "GITHUB_TOKEN": "your-pat"
@@ -178,17 +178,17 @@ Replace `/home/you` with your home directory (`echo $HOME`). Bun installs global
 }
 ```
 
-> Claude Code spawns MCP subprocesses without your shell PATH, so always use absolute paths to binaries. Find them with `which github-ci` or `which bunx`.
+> Claude Code spawns MCP subprocesses without your shell PATH, so always use absolute paths to binaries. Find them with `which claude-beacon` or `which bunx`.
 
 ### 6. Start Claude Code
 
 ```bash
-claude --dangerously-load-development-channels server:github-ci
+claude --dangerously-load-development-channels server:claude-beacon
 ```
 
 You should see:
 ```
-Listening for channel messages from: server:github-ci
+Listening for channel messages from: server:claude-beacon
 ```
 
 The server is now running. Push a commit, trigger a CI run, or let a PR fall behind — notifications will appear in your session automatically.
@@ -207,9 +207,9 @@ No tunnel, no webhook config. Polls the [GitHub Events API](https://docs.github.
 ```json
 {
   "mcpServers": {
-    "github-ci": {
+    "claude-beacon": {
       "command": "/home/you/.bun/bin/bun",
-      "args": ["run", "/path/to/claude-code-github-ci-channel/src/ghwatch.ts"],
+      "args": ["run", "/path/to/claude-beacon/src/ghwatch.ts"],
       "env": {
         "WATCH_REPOS": "owner/repo1,owner/repo2"
       }
@@ -222,7 +222,7 @@ Auth: uses `gh auth token` automatically. Override with `GITHUB_TOKEN` if needed
 
 Start the same way:
 ```bash
-claude --dangerously-load-development-channels server:github-ci
+claude --dangerously-load-development-channels server:claude-beacon
 ```
 
 ---
@@ -270,11 +270,11 @@ cp .env.example .env
 
 ```bash
 # After global install (recommended)
-github-ci-mux                            # reads .env from current directory
-github-ci-mux --config my-config.yaml   # optional YAML config
+claude-beacon-mux                            # reads .env from current directory
+claude-beacon-mux --config my-config.yaml   # optional YAML config
 
 # Or via bunx (no install)
-bunx -p claude-code-github-ci-channel github-ci-mux
+bunx -p claude-beacon claude-beacon-mux
 
 # Or from cloned repo
 bun run start:mux
@@ -283,7 +283,7 @@ bun run start:mux
 **3. Register the mux in Claude Code** (run once — applies to all projects):
 
 ```bash
-claude mcp add --transport http github-ci http://127.0.0.1:9444/mcp
+claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp
 ```
 
 Or add to `.mcp.json` in your project:
@@ -291,7 +291,7 @@ Or add to `.mcp.json` in your project:
 ```json
 {
   "mcpServers": {
-    "github-ci": {
+    "claude-beacon": {
       "url": "http://127.0.0.1:9444/mcp",
       "type": "http"
     }
@@ -302,7 +302,7 @@ Or add to `.mcp.json` in your project:
 **4. Start Claude Code normally:**
 
 ```bash
-claude --dangerously-load-development-channels server:github-ci
+claude --dangerously-load-development-channels server:claude-beacon
 ```
 
 **5. Register your session filter** — tell the mux which repo and branch this session is watching:
@@ -317,7 +317,7 @@ To make this automatic, add to `~/.claude/CLAUDE.md`:
 
 ```markdown
 ## GitHub CI Channel — session filter
-When github-ci MCP connects, call `set_filter` immediately:
+When claude-beacon MCP connects, call `set_filter` immediately:
 run `git remote get-url origin` (parse to owner/repo) and
 `git branch --show-current`, then call set_filter with those values.
 ```
@@ -342,10 +342,10 @@ Pass it via `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "github-ci": {
+    "claude-beacon": {
       "command": "/home/you/.bun/bin/bun",
       "args": [
-        "run", "/path/to/claude-code-github-ci-channel/src/index.ts",
+        "run", "/path/to/claude-beacon/src/index.ts",
         "--config", "/path/to/my-config.yaml"
       ],
       "env": {
@@ -460,7 +460,7 @@ To authorize automatic actions, add this block to `~/.claude/CLAUDE.md`:
 ```markdown
 ## GitHub CI Channel — Automatic Actions
 
-When the `github-ci` MCP channel sends a notification, you are pre-authorized to act without additional confirmation:
+When the `claude-beacon` MCP channel sends a notification, you are pre-authorized to act without additional confirmation:
 
 - **Branch behind base**: Create a git worktree at `/tmp/pr-<N>-rebase`, rebase onto the base branch, `git push --force-with-lease`, remove the worktree.
 - **Merge conflicts**: Same worktree workflow; resolve conflicts during the interactive rebase.
@@ -508,7 +508,7 @@ Streamable HTTP transport has no persistent connection, so the mux can't detect 
 
 The mux includes a 30-minute idle TTL — sessions with no incoming requests for 30 minutes are removed automatically. You will see log lines like:
 ```
-[github-ci:mux] Session a1b2c3d4 idle >30 min — removed (total: 2)
+[claude-beacon:mux] Session a1b2c3d4 idle >30 min — removed (total: 2)
 ```
 
 If you need to clear stale sessions immediately, restart the mux process. The session count should match the number of active Claude Code windows connected to it.
