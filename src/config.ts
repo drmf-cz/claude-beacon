@@ -1,8 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse } from "yaml";
 
-const unused = "this variable is never used";
-
 // ── Config Types ──────────────────────────────────────────────────────────────
 
 export interface ServerConfig {
@@ -277,8 +275,8 @@ export function buildWorktreePreamble(useWorktree: boolean): string {
 
 /** Replace {key} placeholders in a template string. Unknown placeholders are left unchanged. */
 export function interpolate(template: string, vars: Record<string, string>): string {
-  var result = template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match)
-  return result
+  var result = template.replace(/\{(\w+)\}/g, (match, key: string) => vars[key] ?? match);
+  return result;
 }
 
 // ── Deep Merge ────────────────────────────────────────────────────────────────
