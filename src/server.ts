@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Config } from "./config.js";
+import { DEFAULT_CONFIG, interpolate } from "./config.js";
 import type {
   CINotification,
   GitHubPushPayload,
@@ -12,9 +14,7 @@ import type {
 } from "./types.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
-const PORT = Number.parseInt(process.env.WEBHOOK_PORT ?? "9443", 10);
 const MAX_LOG_CHARS = 8000;
-const MAIN_BRANCHES = new Set(["main", "master"]);
 
 // ── Security ──────────────────────────────────────────────────────────────────
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — PR review payloads with diff context can exceed 100 KB
@@ -66,12 +66,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms = 15_000): Pr
   }
 }
 
-/** Maximum review events buffered per PR window (memory / prompt-size guard). */
-const MAX_EVENTS_PER_WINDOW = 50;
-
 // ── PR Review Debounce ────────────────────────────────────────────────────────
-const REVIEW_DEBOUNCE_MS = Number.parseInt(process.env.REVIEW_DEBOUNCE_MS ?? "30000", 10) || 30_000;
-const REVIEW_COOLDOWN_MS = 5 * 60 * 1000; // 5 min — discard events after a notification fires
 
 export interface ReviewEventRecord {
   type: "review" | "review_comment" | "issue_comment" | "unresolved_thread";
@@ -112,7 +107,9 @@ export function isInReviewCooldown(key: string): boolean {
  * is in cooldown (event discarded), true otherwise.
  *
  * When the timer fires, `onFire` is called with all accumulated events, then
- * a 5-minute cooldown is set for the key so subsequent bursts are dropped.
+ * a cooldown is set for the key so subsequent bursts are dropped.
+ *
+ * `opts` overrides the debounce/cooldown/cap values from DEFAULT_CONFIG when provided.
  */
 export function scheduleReviewNotification(
   key: string,
@@ -122,29 +119,34 @@ export function scheduleReviewNotification(
     events: ReviewEventRecord[],
     meta: { prNumber: number; prTitle: string; prUrl: string; repo: string },
   ) => void,
+  opts: { debounceMs?: number; cooldownMs?: number; maxEvents?: number } = {},
 ): boolean {
+  const debounceMs = opts.debounceMs ?? DEFAULT_CONFIG.server.debounce_ms;
+  const cooldownMs = opts.cooldownMs ?? DEFAULT_CONFIG.server.cooldown_ms;
+  const maxEvents = opts.maxEvents ?? DEFAULT_CONFIG.server.max_events_per_window;
+
   if (isInReviewCooldown(key)) return false;
 
   const existing = pendingReviews.get(key);
   if (existing) {
-    if (existing.events.length >= MAX_EVENTS_PER_WINDOW) return false; // window full
+    if (existing.events.length >= maxEvents) return false; // window full
     clearTimeout(existing.timer);
     existing.events.push(event);
     existing.timer = setTimeout(() => {
       const entry = pendingReviews.get(key);
       pendingReviews.delete(key);
-      reviewCooldowns.set(key, Date.now() + REVIEW_COOLDOWN_MS);
+      reviewCooldowns.set(key, Date.now() + cooldownMs);
       if (entry) onFire(entry.events, prMeta);
-    }, REVIEW_DEBOUNCE_MS);
+    }, debounceMs);
   } else {
     const entry: PendingPRReview = {
       ...prMeta,
       events: [event],
       timer: setTimeout(() => {
         pendingReviews.delete(key);
-        reviewCooldowns.set(key, Date.now() + REVIEW_COOLDOWN_MS);
+        reviewCooldowns.set(key, Date.now() + cooldownMs);
         onFire(entry.events, prMeta);
-      }, REVIEW_DEBOUNCE_MS),
+      }, debounceMs),
     };
     pendingReviews.set(key, entry);
   }
@@ -154,6 +156,7 @@ export function scheduleReviewNotification(
 export function buildReviewNotification(
   events: ReviewEventRecord[],
   meta: { prNumber: number; prTitle: string; prUrl: string; repo: string },
+  config: Config = DEFAULT_CONFIG,
 ): CINotification {
   // Group by reviewer preserving insertion order
   const byReviewer = new Map<string, ReviewEventRecord[]>();
@@ -184,21 +187,13 @@ export function buildReviewNotification(
     }
   }
 
-  lines.push(
-    "",
-    "MANDATORY: Enter plan mode first.",
-    "1. Read every linked thread and summarise what each one asks for",
-    "2. Draft a plan listing the file + change for each thread",
-    "3. Only after the plan is complete, use the pr-comment-response skill to execute",
-    "",
-    "Do NOT apply any fix before the plan step is done.",
-    "",
-    "Subagent instructions (execution phase):",
-    `1. For each comment thread above, open the link and read full context`,
-    `2. Code comments: apply the fix in a worktree, commit`,
-    `3. Questions / style: reply inline with a concise explanation`,
-    `4. Use gh-pr-reply.sh --batch to post all replies in one shot`,
-  );
+  if (config.code_style) {
+    lines.push("", "── Code style guidelines ──", config.code_style);
+  }
+
+  const behavior = config.behavior.on_pr_review;
+  const instruction = interpolate(behavior.instruction, { skill: behavior.skill });
+  lines.push("", ...instruction.split("\n"));
 
   return {
     summary: lines.join("\n"),
@@ -265,6 +260,7 @@ function parseWorkflowRunEvent(
   event: string,
   payload: GitHubWebhookPayload,
   repo: string,
+  config: Config,
 ): CINotification | null {
   const run = payload.workflow_run;
   if (!run) return null;
@@ -275,7 +271,8 @@ function parseWorkflowRunEvent(
   const headBranch = sanitizeBody(run.head_branch ?? "", 100);
   const workflowName = sanitizeBody(run.name ?? "", 100);
   const duration = formatDuration(run.run_started_at, run.updated_at);
-  const isMainBranch = MAIN_BRANCHES.has(run.head_branch);
+  const mainBranches = new Set(config.server.main_branches);
+  const isMainBranch = mainBranches.has(run.head_branch);
 
   const lines = [
     `${emoji} CI ${status.toUpperCase()}: ${workflowName} on ${repo}`,
@@ -287,29 +284,18 @@ function parseWorkflowRunEvent(
   if (status === "failure") {
     lines.push("", "Fetch logs and diagnose:", `  fetch_workflow_logs("${run.html_url}")`);
 
-    if (isMainBranch) {
-      lines.push(
-        "",
-        "🚨 Main branch is broken. Act immediately — no confirmation needed.",
-        "Use the Agent tool NOW to spawn a subagent with these instructions:",
-        `Diagnose and fix the broken CI on main in ${repo}:`,
-        `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
-        "2. Identify the failing step and root cause",
-        "3. Apply a targeted fix in the codebase",
-        "4. Commit and push to restore main",
-        "5. Confirm CI is green.",
-      );
-    } else {
-      lines.push(
-        "",
-        "Act immediately — no confirmation needed.",
-        "Use the Agent tool NOW to spawn a subagent with these instructions:",
-        `Investigate the CI failure on branch ${headBranch} in ${repo}:`,
-        `1. Call fetch_workflow_logs("${run.html_url}") to read the failure`,
-        "2. Identify the root cause and fix it",
-        "3. Push the fix to the branch.",
-      );
-    }
+    const vars = {
+      repo,
+      branch: headBranch,
+      run_url: run.html_url,
+      workflow: workflowName,
+      status,
+      commit: commitMsg,
+    };
+    const template = isMainBranch
+      ? config.behavior.on_ci_failure_main.instruction
+      : config.behavior.on_ci_failure_branch.instruction;
+    lines.push("", ...interpolate(template, vars).split("\n"));
   }
 
   return {
@@ -332,11 +318,12 @@ function parseWorkflowRunEvent(
 export function parseWorkflowEvent(
   event: string,
   payload: GitHubWebhookPayload,
+  config: Config = DEFAULT_CONFIG,
 ): CINotification | null {
   const repo = payload.repository?.full_name ?? "unknown";
 
   if (event === "workflow_run") {
-    return parseWorkflowRunEvent(event, payload, repo);
+    return parseWorkflowRunEvent(event, payload, repo, config);
   }
 
   if (event === "workflow_job") {
@@ -392,76 +379,63 @@ export function parseWorkflowEvent(
   };
 }
 
-export function parsePullRequestEvent(payload: GitHubWebhookPayload): CINotification | null {
+export function parsePullRequestEvent(
+  payload: GitHubWebhookPayload,
+  config: Config = DEFAULT_CONFIG,
+): CINotification | null {
   const pr = payload.pull_request;
   if (!pr) return null;
 
   const repo = payload.repository?.full_name ?? "unknown";
   const state: MergeableState = pr.mergeable_state;
 
+  const prVars = {
+    repo,
+    pr_number: String(pr.number),
+    pr_title: pr.title,
+    pr_url: pr.html_url,
+    head_branch: pr.head.ref,
+    base_branch: pr.base.ref,
+  };
+  const prMeta = {
+    source: "github-ci",
+    event: "pull_request",
+    action: payload.action ?? "",
+    repo,
+    pr_number: String(pr.number),
+    pr_title: pr.title,
+    head_branch: pr.head.ref,
+    base_branch: pr.base.ref,
+    pr_url: pr.html_url,
+    mergeable_state: state,
+    sender: payload.sender?.login ?? "",
+  };
+
   if (state === "dirty") {
+    const instruction = interpolate(config.behavior.on_merge_conflict.instruction, prVars);
     return {
       summary: [
         `⚠️ MERGE CONFLICT — PR #${pr.number}: "${pr.title}"`,
         `Repo: ${repo} | Branch: ${pr.head.ref} → ${pr.base.ref}`,
         `URL: ${pr.html_url}`,
         "",
-        `PR #${pr.number} has merge conflicts with ${pr.base.ref}. Act immediately — no confirmation needed.`,
-        "",
-        "Use the Agent tool NOW to spawn a subagent with these instructions:",
-        `Resolve merge conflicts for PR #${pr.number} in ${repo}:`,
-        `1. git worktree add /tmp/pr-${pr.number}-rebase ${pr.head.ref}`,
-        `2. cd /tmp/pr-${pr.number}-rebase && git fetch origin`,
-        `3. git rebase origin/${pr.base.ref} — fix conflicts, then: git add -A && git rebase --continue`,
-        `4. git push --force-with-lease origin ${pr.head.ref}`,
-        `5. git worktree remove /tmp/pr-${pr.number}-rebase`,
+        instruction,
       ].join("\n"),
-      meta: {
-        source: "github-ci",
-        event: "pull_request",
-        action: payload.action ?? "",
-        repo,
-        pr_number: String(pr.number),
-        pr_title: pr.title,
-        head_branch: pr.head.ref,
-        base_branch: pr.base.ref,
-        pr_url: pr.html_url,
-        mergeable_state: state,
-        sender: payload.sender?.login ?? "",
-      },
+      meta: prMeta,
     };
   }
 
   if (state === "behind") {
+    const instruction = interpolate(config.behavior.on_branch_behind.instruction, prVars);
     return {
       summary: [
         `⬇️ BRANCH BEHIND BASE — PR #${pr.number}: "${pr.title}"`,
         `Repo: ${repo} | Branch: ${pr.head.ref} → ${pr.base.ref}`,
         `URL: ${pr.html_url}`,
         "",
-        `PR #${pr.number} is behind ${pr.base.ref} (no conflicts). Act immediately — no confirmation needed.`,
-        "",
-        "Use the Agent tool NOW to spawn a subagent with these instructions:",
-        `Rebase PR #${pr.number} in ${repo}:`,
-        `1. git worktree add /tmp/pr-${pr.number}-rebase ${pr.head.ref}`,
-        `2. cd /tmp/pr-${pr.number}-rebase && git fetch origin`,
-        `3. git rebase origin/${pr.base.ref}`,
-        `4. git push --force-with-lease origin ${pr.head.ref}`,
-        `5. git worktree remove /tmp/pr-${pr.number}-rebase`,
+        instruction,
       ].join("\n"),
-      meta: {
-        source: "github-ci",
-        event: "pull_request",
-        action: payload.action ?? "",
-        repo,
-        pr_number: String(pr.number),
-        pr_title: pr.title,
-        head_branch: pr.head.ref,
-        base_branch: pr.base.ref,
-        pr_url: pr.html_url,
-        mergeable_state: state,
-        sender: payload.sender?.login ?? "",
-      },
+      meta: prMeta,
     };
   }
 
@@ -500,6 +474,7 @@ export async function checkPRsAfterPush(
   baseBranch: string,
   token: string,
   mcp: McpServer,
+  config: Config = DEFAULT_CONFIG,
 ): Promise<void> {
   // Give GitHub a moment to start computing mergeability
   await new Promise<void>((r) => setTimeout(r, 4_000));
@@ -544,22 +519,25 @@ export async function checkPRsAfterPush(
 
     if (state !== "dirty" && state !== "behind") continue;
 
-    const notification = parsePullRequestEvent({
-      action: "synchronize",
-      pull_request: {
-        number: pr.number,
-        title: pr.title,
-        state: "open",
-        html_url: pr.html_url,
-        head: { ref: pr.head.ref, sha: "" },
-        base: { ref: pr.base.ref, sha: "" },
-        mergeable: state !== "dirty",
-        mergeable_state: state,
-        user: pr.user,
+    const notification = parsePullRequestEvent(
+      {
+        action: "synchronize",
+        pull_request: {
+          number: pr.number,
+          title: pr.title,
+          state: "open",
+          html_url: pr.html_url,
+          head: { ref: pr.head.ref, sha: "" },
+          base: { ref: pr.base.ref, sha: "" },
+          mergeable: state !== "dirty",
+          mergeable_state: state,
+          user: pr.user,
+        },
+        repository: { full_name: repo },
+        sender: pr.user,
       },
-      repository: { full_name: repo },
-      sender: pr.user,
-    });
+      config,
+    );
 
     if (!notification) continue;
 
@@ -762,10 +740,37 @@ async function sendChannelNotification(
   );
 }
 
+/** Returns a skip response if the event or repo is not in the configured allowlists, null otherwise. */
+function applyWebhookFilters(
+  event: string,
+  payloadRepo: string | undefined,
+  config: Config,
+): Response | null {
+  if (
+    config.webhooks.allowed_events.length > 0 &&
+    !config.webhooks.allowed_events.includes(event)
+  ) {
+    log(`Skipping event "${event}" — not in allowed_events`);
+    return new Response("Skipped", { status: 200 });
+  }
+  if (
+    config.webhooks.allowed_repos.length > 0 &&
+    payloadRepo &&
+    !config.webhooks.allowed_repos.includes(payloadRepo)
+  ) {
+    log(`Skipping repo "${payloadRepo}" — not in allowed_repos`);
+    return new Response("Skipped", { status: 200 });
+  }
+  return null;
+}
+
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────
-export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve> {
+export function startWebhookServer(
+  mcp: McpServer,
+  config: Config = DEFAULT_CONFIG,
+): ReturnType<typeof Bun.serve> {
   return Bun.serve({
-    port: PORT,
+    port: config.server.port,
     async fetch(req) {
       if (req.method === "GET") {
         return new Response(JSON.stringify({ status: "ok", server: "github-ci-channel" }), {
@@ -811,15 +816,20 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
         return new Response("Invalid JSON", { status: 400 });
       }
 
+      const payloadRepo = payload.repository?.full_name;
+      const filterResp = applyWebhookFilters(event, payloadRepo, config);
+      if (filterResp) return filterResp;
+
       log(`Received: ${event} (${payload.action ?? "no action"}) delivery=${deliveryId}`);
 
       if (event === "push") {
         const push = payload as unknown as GitHubPushPayload;
         const branch = push.ref.replace("refs/heads/", "");
         const token = process.env.GITHUB_TOKEN;
-        if (MAIN_BRANCHES.has(branch) && token) {
+        const mainBranches = new Set(config.server.main_branches);
+        if (mainBranches.has(branch) && token) {
           log(`Push to ${branch} — checking open PRs for merge status`);
-          void checkPRsAfterPush(push.repository.full_name, branch, token, mcp);
+          void checkPRsAfterPush(push.repository.full_name, branch, token, mcp, config);
         }
         return new Response("OK", { status: 200 });
       }
@@ -841,7 +851,7 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
             prMeta,
             reviewEvent,
             async (evts, meta) => {
-              const notification = buildReviewNotification(evts, meta);
+              const notification = buildReviewNotification(evts, meta, config);
               try {
                 await sendChannelNotification(mcp, notification);
                 log(
@@ -850,6 +860,11 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
               } catch (err) {
                 log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
               }
+            },
+            {
+              debounceMs: config.server.debounce_ms,
+              cooldownMs: config.server.cooldown_ms,
+              maxEvents: config.server.max_events_per_window,
             },
           );
           if (!accepted) log(`PR #${prMeta.prNumber} review event discarded (cooldown active)`);
@@ -866,8 +881,8 @@ export function startWebhookServer(mcp: McpServer): ReturnType<typeof Bun.serve>
 
       const notification =
         event === "pull_request"
-          ? parsePullRequestEvent(payload)
-          : parseWorkflowEvent(event, payload);
+          ? parsePullRequestEvent(payload, config)
+          : parseWorkflowEvent(event, payload, config);
 
       if (!notification) {
         return new Response("Unparseable", { status: 200 });
