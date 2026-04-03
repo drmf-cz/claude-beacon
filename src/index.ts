@@ -1,6 +1,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DEFAULT_CONFIG, loadConfig } from "./config.js";
-import { createMcpServer, startWebhookServer } from "./server.js";
+import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
 
 const log = (...args: unknown[]) => console.error("[github-ci]", ...args);
 
@@ -29,7 +29,10 @@ if (configPath) {
 const mcp = createMcpServer();
 
 try {
-  const webhookServer = startWebhookServer(mcp, config);
+  const webhookServer = startWebhookServer(
+    async (notification) => sendChannelNotification(mcp, notification),
+    config,
+  );
   log(`Webhook server listening on http://localhost:${webhookServer.port}`);
 } catch (err: unknown) {
   const isAddrInUse =

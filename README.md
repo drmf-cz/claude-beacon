@@ -193,6 +193,53 @@ claude --dangerously-load-development-channels server:github-ci
 
 ---
 
+## Running multiple Claude Code sessions (hub + relay)
+
+By default each Claude Code session starts its own webhook server subprocess. If you open a second session it fails to bind port 9443 and receives no events.
+
+The **hub + relay** mode solves this: one hub process owns the port and routes each event to the session whose current repo and branch match.
+
+```
+GitHub → :9443 → [Hub]  ─── /tmp/ghci-hub.sock ───┬── Relay A (CC session, repo=foo branch=main)
+                                                    ├── Relay B (CC session, repo=foo branch=feat/x)
+                                                    └── Relay C (CC session, repo=bar branch=main)
+```
+
+### Quick setup
+
+**1. Start the hub once** (tmux pane, or [systemd unit](docs/multiplexer.md#running-as-a-systemd-unit)):
+
+```bash
+GITHUB_WEBHOOK_SECRET=your-secret GITHUB_TOKEN=your-pat \
+  bun run /path/to/src/hub.ts [--config my-config.yaml]
+```
+
+**2. Point each Claude Code session at the relay** instead of the standalone server:
+
+```json
+{
+  "mcpServers": {
+    "github-ci": {
+      "command": "/home/you/.bun/bin/bun",
+      "args": ["run", "/path/to/claude-code-github-ci-channel/src/relay.ts"],
+      "env": {
+        "GITHUB_TOKEN": "your-pat",
+        "GHCI_HUB_SOCKET": "/tmp/ghci-hub.sock"
+      }
+    }
+  }
+}
+```
+
+> Note: `GITHUB_WEBHOOK_SECRET` belongs in the **hub** environment only.  
+> The relay never processes raw webhook payloads.
+
+**3. Start Claude Code normally.** The relay auto-detects your current repo and branch from `git` and registers with the hub. When you switch branches the relay updates its filter within 30 seconds automatically.
+
+For full details — routing rules, protocol reference, systemd unit, comparison table — see **[docs/multiplexer.md](docs/multiplexer.md)**.
+
+---
+
 ## YAML configuration file
 
 For anything beyond the five environment variables, use a YAML config file. It lets you tune debounce windows, filter which repos or event types trigger Claude, and — most importantly — replace the built-in agent instructions with your own.
