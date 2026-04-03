@@ -193,6 +193,131 @@ claude --dangerously-load-development-channels server:github-ci
 
 ---
 
+## YAML configuration file
+
+For anything beyond the five environment variables, use a YAML config file. It lets you tune debounce windows, filter which repos or event types trigger Claude, and — most importantly — replace the built-in agent instructions with your own.
+
+### Quick start
+
+```bash
+cp config.example.yaml my-config.yaml
+# edit my-config.yaml to taste
+```
+
+Pass it via `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "github-ci": {
+      "command": "/home/you/.bun/bin/bun",
+      "args": [
+        "run", "/path/to/claude-code-github-ci-channel/src/index.ts",
+        "--config", "/path/to/my-config.yaml"
+      ],
+      "env": {
+        "GITHUB_WEBHOOK_SECRET": "...",
+        "GITHUB_TOKEN": "..."
+      }
+    }
+  }
+}
+```
+
+Environment variables (`WEBHOOK_PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`) always take precedence over their YAML equivalents. All fields are optional — omitted keys inherit from the defaults below.
+
+### Server options
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `server.port` | number | `9443` | HTTP port for the webhook receiver |
+| `server.debounce_ms` | number | `30000` | How long (ms) to accumulate review events before firing |
+| `server.cooldown_ms` | number | `300000` | Suppress duplicate notifications for the same PR within this window |
+| `server.max_events_per_window` | number | `50` | Maximum review events buffered per debounce window |
+| `server.main_branches` | string[] | `["main","master"]` | Branch names treated as production |
+
+### Webhook filters
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `webhooks.allowed_events` | string[] | `[]` (all) | Allowlist of GitHub event types to process. Empty = accept all supported types |
+| `webhooks.allowed_repos` | string[] | `[]` (all) | Allowlist of repos as `"owner/repo"`. Empty = accept all |
+
+Supported event type strings: `push`, `workflow_run`, `workflow_job`, `check_suite`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `pull_request_review_thread`, `issue_comment`.
+
+### Behavior — agent instructions
+
+These control what Claude is asked to do when an event fires. Each field accepts a multi-line string. Placeholders are interpolated at runtime (see [Template placeholders](#template-placeholders)).
+
+| Key | Triggered by | Notable sub-fields |
+|---|---|---|
+| `behavior.on_ci_failure_main.instruction` | `workflow_run` failure on a main branch | — |
+| `behavior.on_ci_failure_branch.instruction` | `workflow_run` failure on any other branch | — |
+| `behavior.on_pr_review.instruction` | PR review / comment events (after debounce) | `require_plan`, `skill` |
+| `behavior.on_merge_conflict.instruction` | PR with `mergeable_state: dirty` | — |
+| `behavior.on_branch_behind.instruction` | PR with `mergeable_state: behind` | — |
+
+**`on_pr_review` sub-fields:**
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `behavior.on_pr_review.require_plan` | boolean | `true` | Whether Claude must enter plan mode before touching code |
+| `behavior.on_pr_review.skill` | string | `"pr-comment-response"` | Skill name invoked to handle the review |
+
+**Code style context:**
+
+```yaml
+behavior:
+  code_style: |
+    - Use TypeScript strict mode; never cast to `any`
+    - Prefer `const` over `let`; avoid mutation
+```
+
+The `code_style` string is prepended to every PR review notification so Claude applies consistent standards when addressing comments.
+
+### Template placeholders
+
+The following placeholders are replaced at runtime inside any `instruction` string:
+
+| Placeholder | Value |
+|---|---|
+| `{repo}` | `owner/repo` |
+| `{branch}` | Branch name |
+| `{pr_number}` | Pull request number |
+| `{workflow_name}` | Workflow / check name |
+| `{run_id}` | GitHub Actions run ID |
+
+### Minimal example
+
+```yaml
+server:
+  debounce_ms: 10000   # faster review batching
+  main_branches: [main, release]
+
+webhooks:
+  allowed_repos:
+    - my-org/my-repo   # only watch this repo
+
+behavior:
+  code_style: |
+    - Go 1.23+; run gofmt before committing
+    - All exported symbols must have godoc comments
+  on_pr_review:
+    require_plan: true
+    skill: pr-comment-response
+```
+
+### Migrating from environment variables
+
+| Old env var | YAML equivalent |
+|---|---|
+| `WEBHOOK_PORT` | `server.port` |
+| `REVIEW_DEBOUNCE_MS` | `server.debounce_ms` |
+
+`GITHUB_WEBHOOK_SECRET` and `GITHUB_TOKEN` have no YAML equivalent — keep them in the `env` block inside `.mcp.json` (secrets should not live in a config file that could be committed to source control).
+
+---
+
 ## Granting Claude automatic action permissions
 
 By default Claude Code will pause and ask for confirmation before rebasing or force-pushing, even when the channel notification says "Act immediately". This is because Claude's `CLAUDE.md` rules rank above channel message instructions — which is correct security behaviour.
