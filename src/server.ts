@@ -89,6 +89,27 @@ export function sanitizeBody(body: string, maxLen = 500): string {
   );
 }
 
+/**
+ * Categorizes a GitHub webhook event into a broad group.
+ * Returns "ci", "review", "push", or the raw action/event string as fallback.
+ */
+export function categorizeEvent(event: string, action: string): string {
+  if (event === "workflow_run" || event === "workflow_job" || event === "check_suite") {
+    return "ci";
+  }
+  if (
+    event === "pull_request" ||
+    event === "pull_request_review" ||
+    event === "pull_request_review_comment"
+  ) {
+    return "review";
+  }
+  if (event === "push") {
+    return "push";
+  }
+  return action.length > 0 ? action : event;
+}
+
 /** Fetch with a hard timeout. Aborts and rejects if the request exceeds `ms` milliseconds. */
 async function fetchWithTimeout(url: string, init: RequestInit, ms = 15_000): Promise<Response> {
   const ac = new AbortController();
