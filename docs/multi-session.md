@@ -180,6 +180,27 @@ unit file itself.
 
 ---
 
+## SSE reconnect recovery
+
+The mux buffers the last 50 notifications per session stream using `NotificationEventStore`. If a Claude Code session's SSE connection drops and reconnects, it sends the standard `Last-Event-ID` header and the mux replays any events delivered since that ID — no notifications are silently lost.
+
+This happens automatically. No configuration needed.
+
+---
+
+## Multi-session coordination — work-context claims
+
+When a CI event cannot be routed to a specific session (no session matches the exact branch), the mux delivers it to all sessions for that repo. To prevent two Claude sessions from concurrently pushing conflicting fixes:
+
+1. Each session calls `claim_notification("<repo>:<branch>")` before acting.
+2. The first caller receives `"ok"` and holds the lock.
+3. Subsequent callers receive `"conflict:<label>"` and must stop.
+4. The claim expires after `server.claim_ttl_ms` (default 10 min) or is released with `release_claim("<key>")`.
+
+The session's label (set via `set_filter`) appears in conflict messages so you can see which session is handling the work.
+
+---
+
 ## Comparison: standalone vs mux
 
 | | Standalone (`src/index.ts`) | Mux (`src/mux.ts`) |
