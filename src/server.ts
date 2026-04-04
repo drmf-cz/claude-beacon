@@ -1183,5 +1183,5 @@ export function getEventLabel(event: string): string {
     push: "Push",
     issue_comment: "Issue Comment",
   };
-  return labels[event];
+  return labels[event] ?? event;
 }
