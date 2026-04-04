@@ -290,6 +290,18 @@ describe("parsePullRequestEvent", () => {
     expect(result?.meta.mergeable_state).toBe("behind");
   });
 
+  it("returns rebase notification for blocked PR (behind + failing checks)", () => {
+    const payload: GitHubWebhookPayload = {
+      ...prPayload,
+      pull_request: { ...basePR, mergeable_state: "blocked", mergeable: true },
+    };
+    const result = parsePullRequestEvent(payload);
+    expect(result).not.toBeNull();
+    expect(result?.summary).toContain("BRANCH BEHIND BASE (blocked)");
+    expect(result?.summary).toContain("rebase");
+    expect(result?.meta.mergeable_state).toBe("blocked");
+  });
+
   it("returns null for clean PR", () => {
     const payload: GitHubWebhookPayload = {
       ...prPayload,

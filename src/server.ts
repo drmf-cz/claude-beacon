@@ -534,15 +534,18 @@ export function parsePullRequestEvent(
     };
   }
 
-  if (state === "behind") {
+  // "blocked" = branch is behind but also has failing required checks.
+  // Treat as "behind": rebase first, then CI re-runs and may pass.
+  if (state === "behind" || state === "blocked") {
     const worktreeSteps = buildWorktreeRebaseSteps(worktreeMode, prVars, false);
     const instruction = interpolate(config.behavior.on_branch_behind.instruction, {
       ...prVars,
       worktree_steps: worktreeSteps,
     });
+    const label = state === "blocked" ? "BRANCH BEHIND BASE (blocked)" : "BRANCH BEHIND BASE";
     return {
       summary: [
-        `⬇️ BRANCH BEHIND BASE — PR #${pr.number}: "${prTitle}"`,
+        `⬇️ ${label} — PR #${pr.number}: "${prTitle}"`,
         `Repo: ${repo} | Branch: ${headBranch} → ${baseBranch}`,
         `URL: ${pr.html_url}`,
         "",
@@ -553,7 +556,7 @@ export function parsePullRequestEvent(
   }
 
   log(
-    `[skip] pull_request PR #${pr.number} on ${repo}: mergeable_state=${state} (only "dirty" or "behind" notifies)`,
+    `[skip] pull_request PR #${pr.number} on ${repo}: mergeable_state=${state} (only "dirty", "behind", or "blocked" notifies)`,
   );
   return null;
 }
@@ -643,16 +646,22 @@ export async function checkPRsAfterPush(
       }
     }
 
-    // Always fetch individual PR — list endpoint omits mergeable_state
+    // Always fetch individual PR — list endpoint omits mergeable_state.
+    // GitHub computes mergeability async after a push; retry up to 3 times
+    // with increasing back-off before giving up.
     let state = await fetchPRMergeableState(repo, pr.number, token);
-
-    // Retry once if GitHub is still computing (common immediately after a push)
-    if (state === "unknown") {
-      await new Promise<void>((r) => setTimeout(r, 5_000));
+    const delays = [5_000, 10_000, 15_000];
+    for (const delay of delays) {
+      if (state !== "unknown") break;
+      await new Promise<void>((r) => setTimeout(r, delay));
       state = await fetchPRMergeableState(repo, pr.number, token);
     }
 
-    if (state !== "dirty" && state !== "behind") continue;
+    log(`PR #${pr.number} "${pr.title}" mergeable_state=${state}`);
+
+    // "blocked" means behind + failing required checks — treat same as "behind"
+    // so the rebase notification fires and CI can re-run after the rebase.
+    if (state !== "dirty" && state !== "behind" && state !== "blocked") continue;
 
     const notification = parsePullRequestEvent(
       {
