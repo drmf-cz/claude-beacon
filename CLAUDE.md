@@ -45,9 +45,9 @@ docs/
 ├── multi-session.md         # Mux server setup guide
 └── worktree-integration.md  # Native worktree mode guide
 
-.claude/commands/
-├── security-review.md  # Security audit skill
-└── review-pr.md        # Full PR review skill
+.claude/skills/
+├── security-review/SKILL.md  # Security audit skill
+└── review-pr/SKILL.md        # Full PR review skill
 
 .github/
 └── PULL_REQUEST_TEMPLATE.md  # PR checklist (mirrors merge checklist below)
