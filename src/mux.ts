@@ -637,16 +637,21 @@ if (config.webhooks.allowed_authors.length === 0) {
 // Validate GITHUB_TOKEN at startup so misconfiguration is visible immediately
 // rather than surfacing as a silent 401 on the first push to main.
 {
+  log(`Working directory: ${process.cwd()} (Bun loads .env from here)`);
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     log(
       "WARNING: GITHUB_TOKEN is not set.",
       "Conflict/behind detection (checkPRsAfterPush) and log fetching will not work.",
-      "Set GITHUB_TOKEN in your .env file or environment and restart.",
+      `Set GITHUB_TOKEN in ${process.cwd()}/.env and restart.`,
     );
   } else {
-    // Lightweight probe: GET /user requires no repo scope but verifies the token is valid.
-    fetch("https://api.github.com/user", {
+    const masked = `${token.slice(0, 12)}...${token.slice(-4)}`;
+    log(`GITHUB_TOKEN found: ${masked}`);
+    // Probe with GET /rate_limit — works with all token types (classic PAT, fine-grained,
+    // OAuth, GitHub App). Fine-grained tokens return 401 on GET /user because that endpoint
+    // requires user-level permissions they don't have.
+    fetch("https://api.github.com/rate_limit", {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
@@ -656,9 +661,10 @@ if (config.webhooks.allowed_authors.length === 0) {
       .then((r) => {
         if (r.status === 401 || r.status === 403) {
           log(
-            `WARNING: GITHUB_TOKEN validation failed (${r.status}) — token is expired or invalid.`,
-            `Conflict/behind detection and log fetching will return 401 until the token is replaced.`,
-            `Set a valid GITHUB_TOKEN in your .env file and restart.`,
+            `WARNING: GITHUB_TOKEN validation failed (${r.status}) — token is expired, invalid, or not approved.`,
+            `For fine-grained tokens: resource owner must be the org (not personal account),`,
+            `required permissions: Pull requests (read), Actions (read).`,
+            `Set a valid GITHUB_TOKEN in ${process.cwd()}/.env and restart.`,
           );
         } else {
           log(`GITHUB_TOKEN validated (status ${r.status})`);
