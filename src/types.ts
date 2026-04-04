@@ -139,3 +139,47 @@ export interface GitHubPushPayload {
   repository: { full_name: string; default_branch: string };
   sender: { login: string };
 }
+
+// ── Security alert payloads ───────────────────────────────────────────────────
+
+export type DependabotAlertSeverity = "low" | "medium" | "high" | "critical";
+
+export interface DependabotAlertPayload {
+  action: "created" | "dismissed" | "reintroduced" | "fixed" | "auto_dismissed" | "auto_reopened";
+  alert: {
+    number: number;
+    state: "open" | "fixed" | "dismissed";
+    security_vulnerability: {
+      package: { ecosystem: string; name: string };
+      severity: DependabotAlertSeverity;
+      /** null when no patched version is available yet */
+      first_patched_version: { identifier: string } | null;
+    };
+    security_advisory: {
+      cve_id: string | null;
+      summary: string;
+      references: Array<{ url: string }>;
+    };
+    html_url: string;
+  };
+  repository: { full_name: string };
+}
+
+export type CodeScanningAlertSeverity = "none" | "note" | "warning" | "error";
+
+export interface CodeScanningAlertPayload {
+  action: "created" | "reopened" | "closed_by_user" | "fixed";
+  alert: {
+    number: number;
+    state: "open" | "fixed" | "dismissed";
+    rule: {
+      id: string;
+      description: string;
+      severity: CodeScanningAlertSeverity;
+    };
+    tool: { name: string };
+    html_url: string;
+    most_recent_instance: { ref: string };
+  };
+  repository: { full_name: string };
+}
