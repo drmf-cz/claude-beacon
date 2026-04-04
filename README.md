@@ -28,6 +28,83 @@ The plugin runs inside your Claude Code session and listens for GitHub events. W
 >
 > **Push to a feature branch does not trigger PR checks.** Only a push to a main/master branch can make other PRs go `behind`. Pushing your own feature branch just updates that branch — it doesn't affect other PRs' merge status.
 
+## Quickstart (5 minutes)
+
+The fastest path is **mux mode**: one persistent server, any number of Claude Code sessions.
+
+```bash
+# 1. Install
+bun add -g claude-beacon
+
+# 2. Generate a webhook secret
+openssl rand -hex 32   # copy the output
+
+# 3. Create .env next to where you'll run the mux
+echo 'GITHUB_WEBHOOK_SECRET=<paste-secret>' >> .env
+echo 'GITHUB_TOKEN=<your-PAT>'             >> .env
+#    Fine-grained PAT needs: Actions:Read + Pull requests:Read
+#    Classic PAT needs: public_repo
+
+# 4. Start the tunnel (keep this running)
+cloudflared tunnel --url http://localhost:9443
+# → prints: https://random-name.trycloudflare.com  ← copy this
+
+# 5. Register the webhook on GitHub
+#    Repo → Settings → Webhooks → Add webhook
+#    Payload URL: <tunnel URL from step 4>
+#    Content type: application/json
+#    Secret: <secret from step 2>
+#    Events: Workflow runs, Workflow jobs, Check suites, Pull requests,
+#            Pull request reviews, Pull request review comments,
+#            Pull request review threads, Issue comments, Pushes
+
+# 6. Start the mux (in a tmux pane or background terminal)
+claude-beacon-mux --author YourGitHubUsername
+
+# 7. Register with Claude Code (run once)
+claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp
+
+# 8. Start Claude Code
+claude --dangerously-load-development-channels server:claude-beacon
+```
+
+**That's it.** The next time a CI run fails or a PR gets a review comment, Claude will receive it and act automatically.
+
+> **Required:** `--author YourGitHubUsername` (or `webhooks.allowed_authors` in a config file). The server refuses to start without it — this prevents Claude from acting on other people's PRs. See [`allowed_authors`](#webhook-filters).
+
+> **Tunnel URL changes on every cloudflared restart.** Update the GitHub webhook Payload URL whenever you restart cloudflared, or use a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) / [ngrok static domain](https://ngrok.com/blog-post/free-static-domains-ngrok-users) for a stable URL.
+
+### What happens next
+
+Once connected, push a commit to trigger a CI run. When it fails:
+
+```
+[claude-beacon] ❌ CI FAILURE: CI on your-org/your-repo
+Branch: feat/my-feature | Commit: "add new feature"
+...
+Fetch logs and diagnose:
+  fetch_workflow_logs("https://github.com/...")
+```
+
+Claude reads the notification, calls `fetch_workflow_logs`, identifies the root cause, and pushes a fix — without any prompting from you.
+
+### Grant automatic action permissions
+
+By default Claude will still pause for confirmation before force-pushing or rebasing, even when the notification says "Act immediately". Add this block to `~/.claude/CLAUDE.md` to pre-authorize those actions:
+
+```markdown
+## GitHub CI Channel — Automatic Actions
+When the `claude-beacon` MCP channel sends a notification, you are pre-authorized to act without additional confirmation:
+- Branch behind base: rebase onto base branch, git push --force-with-lease
+- Merge conflicts: same rebase workflow, resolve conflicts
+- CI failure on main: spawn subagent, fetch logs, diagnose, fix, push
+- CI failure on feature branch: spawn subagent, fetch logs, fix, push
+- PR review / comments: plan mode, address threads, reply with gh-pr-reply.sh --batch
+The channel notification IS the permission. No additional confirmation needed.
+```
+
+---
+
 ## Architecture
 
 ```
@@ -58,10 +135,12 @@ The MCP server is started automatically by Claude Code as a subprocess — you n
 
 - [Bun](https://bun.sh) ≥ 1.1.0 — the package runs on Bun; `npx` will not work
 - Claude Code ≥ 2.1.80
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) (or ngrok)
-- GitHub PAT — fine-grained: **Actions: Read** + **Pull requests: Read** | classic: `public_repo`
-
-> `GITHUB_TOKEN` is required for two features: `fetch_workflow_logs` (log fetching) and `checkPRsAfterPush` (listing open PRs after a push). Without it, those features silently no-op.
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or [ngrok](https://ngrok.com) — to expose the webhook receiver to the internet
+- **`--author YourGitHubUsername`** — **required at startup**. The server refuses to start without it. This is the GitHub username (or email for co-authored PRs) whose events Claude should act on. See [`allowed_authors`](#webhook-filters).
+- **`GITHUB_TOKEN`** — required for log fetching and PR status checks. Without it those features silently no-op.
+  - Fine-grained PAT: **Actions: Read** + **Pull requests: Read**, resource owner = the org/user that owns the repo
+  - Classic PAT: `public_repo` scope
+  - For org repos with fine-grained tokens: the org must approve the token (Settings → Personal access tokens → Active tokens)
 
 ## Installation
 
@@ -592,6 +671,31 @@ These are for different apps:
 - `~/.mcp.json` or `.mcp.json` → Claude Code **CLI** (`claude` command)
 
 `--dangerously-load-development-channels` reads from `.mcp.json`, not the Desktop config.
+
+### Claude receives notifications but doesn't act automatically
+
+The most common cause: the CLAUDE.md permissions block is missing. Without it, Claude pauses for confirmation before pushing or rebasing even when the notification says "Act immediately".
+
+Add the permissions block to `~/.claude/CLAUDE.md` — see [Granting Claude automatic action permissions](#granting-claude-automatic-action-permissions) above.
+
+### I configured everything but no notifications ever arrive
+
+Work through this checklist in order:
+
+1. **Webhook delivery** — Repo → Settings → Webhooks → click your webhook → Recent Deliveries. Trigger any push. Do you see a green ✓? If red ✗, the secret or URL is wrong.
+2. **Tunnel running?** — Cloudflared must be running. If it restarted, the URL changed — update GitHub webhook Payload URL.
+3. **Event types ticked?** — In webhook settings, verify all 9 event types are selected (especially Pushes — required for behind-PR detection).
+4. **`--author` matches PR author?** — The value you pass to `--author` must exactly match the GitHub login of whoever authors the PRs. Case-sensitive.
+5. **Claude Code flag** — Must start with `claude --dangerously-load-development-channels server:claude-beacon`. The server name (`server:claude-beacon`) must match the key in `.mcp.json`.
+6. **Mux mode:** call `set_filter` in the session to register it. Without `set_filter`, the mux has no session to route events to (they are queued for up to 2 hours, so a late `set_filter` call still replays them).
+
+### GITHUB_TOKEN returns 401 on startup
+
+If you see `GITHUB_TOKEN validation failed (401)` at startup:
+
+- Verify the token is set in the right place. The mux server loads `.env` from its **working directory** (where you ran `claude-beacon-mux`), not your home directory. Check with the CWD log line printed at startup.
+- For fine-grained tokens: resource owner must be the org (not your personal account), and the org must have approved the token.
+- Run `claude-beacon --help` or `claude-beacon-mux --help` for required token scopes.
 
 ### Tunnel URL changed
 

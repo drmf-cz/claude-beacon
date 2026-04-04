@@ -590,16 +590,60 @@ log(`MCP HTTP server listening on http://127.0.0.1:${MCP_PORT}/mcp`);
 
 // ── Webhook server ────────────────────────────────────────────────────────────
 
+const cliArgs = process.argv.slice(2);
+
+// ── --help ────────────────────────────────────────────────────────────────────
+if (cliArgs.includes("--help") || cliArgs.includes("-h")) {
+  process.stdout.write(`claude-beacon-mux — Persistent mux server for multi-session Claude Code
+
+Usage:
+  claude-beacon-mux --author <username> [options]
+
+Required:
+  --author <username|email>   GitHub username or email whose PRs trigger
+                              actions. Repeat for multiple entries.
+
+Options:
+  --config <path>             Path to a YAML config file (see config.example.yaml)
+  --help, -h                  Show this help message
+
+Environment variables (put in .env or export in shell):
+  GITHUB_WEBHOOK_SECRET       HMAC-SHA256 secret — must match GitHub webhook settings
+  GITHUB_TOKEN                PAT for log fetching and PR status checks
+                              Fine-grained: Actions:Read + Pull requests:Read
+                              Classic: public_repo
+  WEBHOOK_PORT                Webhook receiver port (default: 9443)
+  MCP_PORT                    MCP HTTP port (default: 9444)
+  REVIEW_DEBOUNCE_MS          Review event batching window ms (default: 30000)
+
+Quick start (mux mode):
+  1. Start the mux once (e.g. in a tmux pane):
+       claude-beacon-mux --author YourGitHubUsername
+  2. Register with Claude Code (run once):
+       claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp
+  3. Start Claude Code normally:
+       claude --dangerously-load-development-channels server:claude-beacon
+  4. In the session, call set_filter to register:
+       set_filter(repo="owner/repo", branch="main", label="main", worktree_path="/path/to/repo")
+
+Routing: each session calls set_filter() to declare which repo+branch it watches.
+Events are routed to matching sessions. Use claim_notification() before acting to
+prevent two sessions from racing on the same task.
+
+Full docs: https://github.com/drmf-cz/claude-beacon\n`);
+  process.exit(0);
+}
+
 const { configPath, authors } = (() => {
-  const configIdx = process.argv.indexOf("--config");
+  const configIdx = cliArgs.indexOf("--config");
   const cliAuthors: string[] = [];
-  for (let i = 0; i < process.argv.length; i++) {
-    if (process.argv[i] === "--author" && process.argv[i + 1]) {
-      cliAuthors.push(process.argv[i + 1] ?? "");
+  for (let i = 0; i < cliArgs.length; i++) {
+    if (cliArgs[i] === "--author" && cliArgs[i + 1]) {
+      cliAuthors.push(cliArgs[i + 1] ?? "");
     }
   }
   return {
-    configPath: configIdx !== -1 ? (process.argv[configIdx + 1] ?? null) : null,
+    configPath: configIdx !== -1 ? (cliArgs[configIdx + 1] ?? null) : null,
     authors: cliAuthors,
   };
 })();

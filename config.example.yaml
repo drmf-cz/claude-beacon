@@ -126,6 +126,12 @@ behavior:
     # fetch + rebase origin/main before diagnosing. Set to false on repos where
     # main is frequently broken or you handle rebasing separately.
     upstream_sync: true
+
+    # NOTE: A `use_agent` toggle (true/false) is planned — when false, Claude will
+    # handle CI fixes in the main session instead of spawning a subagent. Not yet
+    # implemented; override the instruction text in the meantime to remove the
+    # "Use the Agent tool NOW" line if you prefer inline fixes.
+
     instruction: |
       Act immediately — no confirmation needed.
       Use the Agent tool NOW to spawn a subagent with these instructions:
