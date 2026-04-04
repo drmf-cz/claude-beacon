@@ -236,3 +236,46 @@ bun run build         # Bundle to dist/
 4. Update webhook handler routing in `startWebhookServer()`
 5. Add tests in `src/__tests__/server.test.ts`
 6. Add the event to GitHub webhook settings
+
+---
+
+## Planned improvements / contribution opportunities
+
+The following features are identified as high value and not yet implemented. PRs welcome.
+
+### High priority
+
+| Feature | Description | Files affected |
+|---|---|---|
+| **`use_agent` toggle for CI failures** | `behavior.on_ci_failure_branch.use_agent: false` — fix CI failures in the main session instead of spawning a subagent. Currently the instruction hardcodes "Use the Agent tool NOW". | `src/config.ts`, `src/server.ts` |
+| **Claude Code startup hook** | Auto-call `set_filter` on session start via a `PrePrompt` or startup hook so developers don't have to call it manually every session. | `CLAUDE.md`, possibly `src/mux.ts` |
+| **MCP status line** | Surface session registration state and current claim in the Claude Code status bar: `claude-beacon ✓ main \| claim: held`. | `src/mux.ts` (MCP server capabilities) |
+| **`rerun_workflow` MCP tool** | New tool: trigger a GitHub Actions rerun via `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`. Completes the CI loop without leaving Claude Code. | `src/server.ts` |
+| **`dependabot_alert` events** | Handle Dependabot security alerts — currently a complete blind spot. Add `vulnerability_alert` and `dependabot_alert` webhook event types. | `src/types.ts`, `src/server.ts`, `src/config.ts` |
+| **`code_scanning_alert` events** | Handle CodeQL / SAST alerts from GitHub's code scanning API. | `src/types.ts`, `src/server.ts`, `src/config.ts` |
+
+### Medium priority
+
+| Feature | Description | Files affected |
+|---|---|---|
+| **`deployment_status` events** | Notify on deployment success/failure — CI green ≠ deployed successfully. | `src/types.ts`, `src/server.ts` |
+| **`pull_request` closed/merged** | Notification when a PR merges or is closed — completes the automation loop. | `src/server.ts` |
+| **Per-event-type instruction routing** | Separate config sections for `on_pr_opened`, `on_pr_merged`, `on_check_run_failed` etc. Currently all PR review events share `on_pr_review`. | `src/config.ts`, `src/server.ts` |
+| **`pre_skills` / `post_skills` lists** | Allow users to chain skills before/after the main `skill` in `on_pr_review`. Currently only one skill can be invoked. | `src/config.ts`, `src/server.ts` |
+| **`list_pr_checks` MCP tool** | New tool: return all check statuses for a PR without fetching full logs. Faster diagnosis of multi-job CI failures. | `src/server.ts` |
+| **Post-action webhook callbacks** | `behavior.on_ci_failure_branch.post_action_hook: "..."` — shell command run after a fix is pushed (e.g. post to Slack). | `src/config.ts` |
+
+### Low priority / nice to have
+
+| Feature | Description |
+|---|---|
+| **`get_pr_diff` MCP tool** | Expose PR diff as context for review tasks — reduces `gh pr diff` calls in instructions. |
+| **Custom placeholder functions** | Allow `{oncall_name}` or `{ticket_id}` resolved from external APIs at notification time. |
+| **MCP resources / prompts** | Expose reusable prompt templates (e.g. "review this diff against our style guide") as MCP resources so Claude can reference them without repeating them in every notification. |
+| **Named tunnel auto-update** | Detect cloudflared URL changes and auto-update the GitHub webhook via the GitHub API. |
+
+### Contributing
+
+See `CLAUDE.md` for branch naming, commit format, version bump rules, and the mandatory merge checklist.
+
+For security-sensitive changes (anything in `src/server.ts` that touches HMAC, token handling, or payload parsing), run the `security-review` skill before opening a PR.
