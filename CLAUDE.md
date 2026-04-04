@@ -143,6 +143,33 @@ Every merged PR **must** bump `package.json` version (enforced by CI):
 
 Update `CHANGELOG.md` with every version bump.
 
+## Release tagging — REQUIRED after every merge to main
+
+After any PR merges to main, check whether a release tag is needed:
+
+```bash
+# 1. Get the version currently on main
+git fetch origin main
+CURRENT=$(git show origin/main:package.json | grep '"version"' | grep -oP '[\d.]+')
+
+# 2. Check if that tag already exists
+git fetch --tags
+if git rev-parse "v${CURRENT}" >/dev/null 2>&1; then
+  echo "v${CURRENT} already tagged — nothing to do"
+else
+  echo "MISSING tag v${CURRENT} — creating it"
+  # Tag the latest merge commit on main (the one that contains the version bump)
+  MERGE_COMMIT=$(git log --oneline --merges origin/main | head -1 | awk '{print $1}')
+  git tag "v${CURRENT}" "$MERGE_COMMIT"
+  git push origin "v${CURRENT}"
+fi
+```
+
+**Rules:**
+- Always tag the **merge commit** on main (not the version-bump commit inside the branch)
+- One tag per version — skip if the tag already exists
+- Run this check whenever asked to "tag releases", "create a release", or after merging a PR
+
 ## Merge checklist
 
 Before marking a PR ready, use the `review-pr` skill. It runs all checks automatically. The checklist it verifies:
