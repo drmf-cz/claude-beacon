@@ -1040,6 +1040,53 @@ function logReviewSkipReason(event: string, payload: GitHubWebhookPayload): void
   log(`[skip] ${event}/${payload.action ?? "?"} — parseReviewWebhookPayload returned null${hint}`);
 }
 
+/**
+ * Handle a parsed review event: skip own comments, then schedule the debounced
+ * notification. Extracted to keep startWebhookServer's fetch handler under the
+ * complexity limit.
+ */
+function handleParsedReviewEvent(
+  event: string,
+  payload: GitHubWebhookPayload,
+  parsed: ReviewPayload,
+  config: Config,
+  notify: NotifyFn,
+): void {
+  const { reviewEvent, prMeta } = parsed;
+  // Skip notifications for comments posted by allowed authors themselves.
+  // When Claude (or the repo owner) replies to a review thread, that reply
+  // fires a new webhook — without this guard it would re-trigger the whole
+  // review cycle.
+  if (isAuthorAllowed(reviewEvent.reviewer, config.webhooks.allowed_authors)) {
+    log(
+      `[skip] PR #${prMeta.prNumber} review event from ${reviewEvent.reviewer} — own comment, not re-notifying`,
+    );
+    return;
+  }
+  const key = `${prMeta.repo}/${prMeta.prNumber}`;
+  const routing = extractEventRouting(event, payload);
+  const accepted = scheduleReviewNotification(
+    key,
+    prMeta,
+    reviewEvent,
+    async (evts, meta) => {
+      const notification = buildReviewNotification(evts, meta, config);
+      try {
+        await notify(notification, routing);
+        log(`PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`);
+      } catch (err) {
+        log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
+      }
+    },
+    {
+      debounceMs: config.server.debounce_ms,
+      cooldownMs: config.server.cooldown_ms,
+      maxEvents: config.server.max_events_per_window,
+    },
+  );
+  if (!accepted) log(`PR #${prMeta.prNumber} review event discarded (cooldown active)`);
+}
+
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────
 
 /**
@@ -1128,32 +1175,7 @@ export function startWebhookServer(
       if (REVIEW_EVENTS.has(event)) {
         const parsed = parseReviewWebhookPayload(event, payload.action, payload);
         if (parsed) {
-          const { reviewEvent, prMeta } = parsed;
-          const repo = prMeta.repo;
-          const key = `${repo}/${prMeta.prNumber}`;
-          const routing = extractEventRouting(event, payload);
-          const accepted = scheduleReviewNotification(
-            key,
-            prMeta,
-            reviewEvent,
-            async (evts, meta) => {
-              const notification = buildReviewNotification(evts, meta, config);
-              try {
-                await notify(notification, routing);
-                log(
-                  `PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`,
-                );
-              } catch (err) {
-                log(`Failed to send PR review notification for PR #${meta.prNumber}:`, err);
-              }
-            },
-            {
-              debounceMs: config.server.debounce_ms,
-              cooldownMs: config.server.cooldown_ms,
-              maxEvents: config.server.max_events_per_window,
-            },
-          );
-          if (!accepted) log(`PR #${prMeta.prNumber} review event discarded (cooldown active)`);
+          handleParsedReviewEvent(event, payload, parsed, config, notify);
         } else {
           logReviewSkipReason(event, payload);
         }
