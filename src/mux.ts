@@ -78,8 +78,38 @@ interface SessionEntry {
   repo: string | null;
   /** Branch filter. null = receive events for all branches of the matched repo. */
   branch: string | null;
+  /** Human-readable label, e.g. "fix/my-branch". Used in conflict messages. */
+  label: string | null;
+  /** Absolute path of this session's working directory (git rev-parse --show-toplevel). */
+  worktree_path: string | null;
   /** Updated on every incoming request — used to detect idle/abandoned sessions. */
   lastActivityAt: number;
+}
+
+// ── Work-context claims ───────────────────────────────────────────────────────
+// Key = "{repo}:{branch}" or "{repo}:*" for broadcast events.
+// Only one session may hold a claim at a time; others must stop.
+
+interface WorkClaim {
+  sessionId: string;
+  label: string | null;
+  expiresAt: number;
+}
+
+const workClaims = new Map<string, WorkClaim>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, c] of workClaims) {
+    if (now > c.expiresAt) {
+      workClaims.delete(k);
+      log(`Claim expired: ${k}`);
+    }
+  }
+}, 60_000).unref();
+
+function claimKeyFor(routing: RoutingKey): string {
+  return routing.branch ? `${routing.repo}:${routing.branch}` : `${routing.repo}:*`;
 }
 
 const sessions = new Map<string, SessionEntry>();
@@ -97,6 +127,13 @@ setInterval(
       if (now - session.lastActivityAt > SESSION_IDLE_TTL_MS) {
         sessions.delete(id);
         log(`Session ${id.slice(0, 8)} idle >30 min — removed (total: ${sessions.size})`);
+        // Clean up any stale claims owned by this session
+        for (const [k, c] of workClaims) {
+          if (c.sessionId === id) {
+            workClaims.delete(k);
+            log(`Stale claim cleared: ${k} (session was idle)`);
+          }
+        }
       }
     }
   },
@@ -105,35 +142,162 @@ setInterval(
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 
-function matchesSession(session: SessionEntry, routing: RoutingKey): boolean {
-  if (session.repo === null) return true; // wildcard — receives everything
-  if (session.repo !== routing.repo) return false;
-  if (routing.branch === null) return true; // event has no branch — broadcast to repo
-  if (session.branch === null) return true; // session watches all branches for repo
-  return session.branch === routing.branch;
+/**
+ * Three-tier session selection:
+ *
+ * Tier 1+2 — Sessions that match by repo AND (exact branch OR wildcard branch).
+ *   These are the ideal handlers: already in the right worktree or opted into all branches.
+ *   Within this tier, exact-branch sessions are sorted first to give them a head-start
+ *   in the claim race.
+ *
+ * Tier 3 (catch-all) — Activated only when Tier 1+2 yields nothing.
+ *   Any session registered for the same repo (possibly on a different branch).
+ *   These must create a worktree to handle the work without polluting their current branch.
+ */
+function selectRecipients(
+  sessionMap: Map<string, SessionEntry>,
+  routing: RoutingKey,
+): { recipients: SessionEntry[]; mode: "normal" | "catchall" } {
+  const forRepo = (s: SessionEntry) => s.repo === null || s.repo === routing.repo;
+
+  // Tier 1+2: exact branch match OR wildcard branch, for this repo
+  const primary = [...sessionMap.values()].filter(
+    (s) =>
+      forRepo(s) && (s.branch === null || routing.branch === null || s.branch === routing.branch),
+  );
+
+  if (primary.length > 0) {
+    // Sort: exact-branch sessions first (give them head-start in claim race)
+    const sorted = [
+      ...primary.filter((s) => routing.branch !== null && s.branch === routing.branch),
+      ...primary.filter((s) => !(routing.branch !== null && s.branch === routing.branch)),
+    ];
+    return { recipients: sorted, mode: "normal" };
+  }
+
+  // Tier 3: no matching session → catch-all, any session for this repo
+  const catchall = [...sessionMap.values()].filter(forRepo);
+  return { recipients: catchall, mode: "catchall" };
+}
+
+/**
+ * Enrich a notification with claim instructions before delivery.
+ *
+ * Modes:
+ *   "owned"   — pre-routing sent to owner; no claim instruction needed
+ *   "normal"  — claim instruction + worktree decision tree
+ *   "catchall"— "⚠️ CATCH-ALL" header; all recipients must create a worktree
+ */
+function enrichNotification(
+  n: CINotification,
+  claimKey: string,
+  mode: "owned" | "normal" | "catchall",
+): CINotification {
+  const meta = { ...n.meta, claim_key: claimKey };
+  if (mode === "owned") return { meta, summary: n.summary };
+
+  const branch = n.meta.branch ?? n.meta.head_branch ?? null;
+  const branchSlug = branch?.replace(/[^a-z0-9]/gi, "-") ?? "fix";
+
+  const catchallHeader =
+    mode === "catchall"
+      ? [
+          "⚠️  CATCH-ALL DELIVERY: no session is currently in the worktree for this branch.",
+          "One of you must volunteer by claiming it and creating a worktree.",
+          "",
+        ]
+      : [];
+
+  const worktreeBlock = branch
+    ? [
+        `IF claim returns "ok":`,
+        `  a) Your current branch IS "${branch}":`,
+        `     → Fix here in your current directory`,
+        `  b) Your current branch IS NOT "${branch}":`,
+        `     → git worktree add /tmp/${branchSlug}-fix ${branch}`,
+        `     → Fix in that worktree, commit, push`,
+        `     → Call release_claim("${claimKey}") when done`,
+        `     → git worktree remove /tmp/${branchSlug}-fix`,
+      ]
+    : [
+        `IF claim returns "ok": fix in your current directory.`,
+        `Call release_claim("${claimKey}") when done.`,
+      ];
+
+  const claimBlock = [
+    "",
+    "─────────────────────────────────────────",
+    ...catchallHeader,
+    `BEFORE ACTING: call claim_notification("${claimKey}")`,
+    '  "ok"           → you have the lock, continue',
+    '  "already_owned"→ you already hold it (TTL extended); continue if still working',
+    '  "conflict:X"   → session X claimed it, STOP immediately',
+    '  "expired"      → STOP',
+    "",
+    ...worktreeBlock,
+    "─────────────────────────────────────────",
+  ].join("\n");
+
+  return { meta, summary: n.summary + claimBlock };
 }
 
 const routeToSessions: NotifyFn = async (
   notification: CINotification,
   routing: RoutingKey,
 ): Promise<void> => {
+  const claimKey = claimKeyFor(routing);
+  const existing = workClaims.get(claimKey);
+
+  // Pre-routing: active claim → send only to the owner (no claim instruction needed)
+  if (existing && Date.now() <= existing.expiresAt) {
+    const ownerSession = sessions.get(existing.sessionId);
+    if (ownerSession) {
+      const enriched = enrichNotification(notification, claimKey, "owned");
+      try {
+        await sendChannelNotification(ownerSession.server, enriched);
+        log(
+          `Routed to claim owner ${existing.label ?? existing.sessionId.slice(0, 8)}: ${claimKey}`,
+        );
+      } catch (err) {
+        log("Failed to push to claim owner — clearing stale claim, re-broadcasting:", err);
+        workClaims.delete(claimKey);
+        // Fall through to re-broadcast below
+      }
+      return;
+    }
+    // Owner session is gone — clear stale claim and re-broadcast
+    log(`Claim owner for ${claimKey} is gone — clearing claim, re-broadcasting`);
+    workClaims.delete(claimKey);
+  }
+
+  // No active claim — select recipients via three-tier logic
+  const { recipients, mode } = selectRecipients(sessions, routing);
+  if (recipients.length === 0) {
+    const registered = [...sessions.values()].map((s) => `${s.repo ?? "*"}@${s.branch ?? "*"}`);
+    log(
+      `No session found for ${routing.repo} — notification dropped.`,
+      `Registered: [${registered.join(", ") || "none"}]`,
+    );
+    return;
+  }
+
+  if (mode === "catchall") {
+    log(
+      `⚠️  No session on ${routing.branch ?? "*"} — using catch-all (${recipients.length} sessions)`,
+    );
+  }
+
+  const enriched = enrichNotification(notification, claimKey, mode);
   let sent = 0;
-  for (const session of sessions.values()) {
-    if (!matchesSession(session, routing)) continue;
+  for (const session of recipients) {
     try {
-      await sendChannelNotification(session.server, notification);
+      await sendChannelNotification(session.server, enriched);
       sent++;
     } catch (err) {
       log("Failed to push notification to session:", err);
     }
   }
-  if (sent === 0) {
-    const registered = [...sessions.values()].map((s) => `${s.repo ?? "*"}@${s.branch ?? "*"}`);
-    log(
-      `No session matched ${routing.repo}@${routing.branch ?? "*"} — notification dropped.`,
-      `Registered filters: [${registered.join(", ") || "none — call set_filter first"}]`,
-    );
-  } else {
+  if (sent > 0) {
     log(`Pushed to ${sent} session(s): ${routing.repo}@${routing.branch ?? "*"}`);
   }
 };
@@ -146,15 +310,17 @@ function createSession(): {
 } {
   const server = createMcpServer();
 
-  // set_filter is session-scoped: the closure captures the session entry once
-  // onsessioninitialized fires and populates it.
+  // set_filter, claim_notification, and release_claim are session-scoped: the closure
+  // captures the session entry once onsessioninitialized fires and populates it.
   let entry: SessionEntry | undefined;
+  let sessionId = "";
 
   server.tool(
     "set_filter",
     [
       "Register this Claude Code session's repo and branch so it receives only",
-      "matching GitHub CI/PR notifications. Call once on session startup.",
+      "matching GitHub CI/PR notifications. Call once on session startup, and again",
+      "after leaving a worktree (to re-register with your original branch).",
       "Get the values with: git remote get-url origin  and  git branch --show-current",
     ].join(" "),
     {
@@ -168,13 +334,34 @@ function createSession(): {
         .string()
         .nullable()
         .describe("Current branch from git, or null for all branches in the repo"),
+      label: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Human-readable session name, e.g. 'fix/my-branch' or 'worktree:/tmp/beacon-fix'. Shown in conflict messages.",
+        ),
+      worktree_path: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Absolute path of this session's working directory (git rev-parse --show-toplevel). Used for routing diagnostics.",
+        ),
     },
-    async ({ repo, branch }) => {
+    async ({ repo, branch, label, worktree_path }) => {
       if (entry) {
         entry.repo = repo;
         entry.branch = branch;
+        entry.label = label ?? null;
+        entry.worktree_path = worktree_path ?? null;
       }
-      log(`Filter set → repo=${repo ?? "*"} branch=${branch ?? "*"}`);
+      if (branch === null) {
+        log(`⚠️  Session registered with branch=null — receives all events for repo ${repo ?? "*"}`);
+      }
+      log(
+        `Filter set → ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"} path=${worktree_path ?? "-"}`,
+      );
       return {
         content: [
           {
@@ -186,17 +373,100 @@ function createSession(): {
     },
   );
 
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    eventStore: new NotificationEventStore(),
-    onsessioninitialized: (sessionId) => {
-      entry = { server, transport, repo: null, branch: null, lastActivityAt: Date.now() };
-      sessions.set(sessionId, entry);
-      log(`Session connected: ${sessionId.slice(0, 8)} (total: ${sessions.size})`);
+  server.tool(
+    "claim_notification",
+    [
+      "Claim exclusive ownership of work for a repo+branch before acting on a notification.",
+      "Also call this proactively when entering a worktree to pre-emptively lock the branch.",
+      "Returns:",
+      "  'ok'            — you now own this branch, proceed",
+      "  'already_owned' — you already own it (TTL extended); continue if still working",
+      "  'conflict:<who>'— another session owns it, STOP immediately",
+    ].join(" "),
+    {
+      claim_key: z
+        .string()
+        .describe(
+          "'{repo}:{branch}' from notification meta.claim_key, or construct from git remote + current branch",
+        ),
     },
-    onsessionclosed: (sessionId) => {
-      sessions.delete(sessionId);
-      log(`Session disconnected: ${sessionId.slice(0, 8)} (total: ${sessions.size})`);
+    async ({ claim_key }) => {
+      const existing = workClaims.get(claim_key);
+      const ttl = config.server.claim_ttl_ms;
+      const myLabel = entry?.label ?? sessionId.slice(0, 8);
+
+      if (existing && Date.now() <= existing.expiresAt) {
+        if (existing.sessionId === sessionId) {
+          // Same session calling again (e.g. buffered re-delivery) — renew TTL
+          existing.expiresAt = Date.now() + ttl;
+          log(`Claim renewed: ${myLabel} still owns ${claim_key}`);
+          return { content: [{ type: "text" as const, text: "already_owned" }] };
+        }
+        // Different session holds the lock
+        const winner = existing.label ?? existing.sessionId.slice(0, 8);
+        log(`Claim conflict: ${myLabel} lost to ${winner} on ${claim_key}`);
+        return { content: [{ type: "text" as const, text: `conflict:${winner}` }] };
+      }
+
+      // No existing claim (or expired) — grant to this session
+      workClaims.set(claim_key, { sessionId, label: myLabel, expiresAt: Date.now() + ttl });
+      log(`Claim granted: ${myLabel} owns ${claim_key}`);
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+
+  server.tool(
+    "release_claim",
+    [
+      "Release the branch claim when work is complete (after pushing and removing the worktree).",
+      "Frees the branch immediately for future claim races rather than waiting for TTL expiry.",
+      "Returns 'released' on success, 'not_owner' if this session does not hold the claim.",
+    ].join(" "),
+    {
+      claim_key: z.string().describe("The same claim_key that was passed to claim_notification"),
+    },
+    async ({ claim_key }) => {
+      const existing = workClaims.get(claim_key);
+      if (!existing || existing.sessionId !== sessionId) {
+        return { content: [{ type: "text" as const, text: "not_owner" }] };
+      }
+      workClaims.delete(claim_key);
+      log(`Claim released: ${entry?.label ?? sessionId.slice(0, 8)} released ${claim_key}`);
+      return { content: [{ type: "text" as const, text: "released" }] };
+    },
+  );
+
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => {
+      const id = randomUUID();
+      sessionId = id;
+      return id;
+    },
+    eventStore: new NotificationEventStore(),
+    onsessioninitialized: (id) => {
+      sessionId = id;
+      entry = {
+        server,
+        transport,
+        repo: null,
+        branch: null,
+        label: null,
+        worktree_path: null,
+        lastActivityAt: Date.now(),
+      };
+      sessions.set(id, entry);
+      log(`Session connected: ${id.slice(0, 8)} (total: ${sessions.size})`);
+    },
+    onsessionclosed: (id) => {
+      sessions.delete(id);
+      // Clear any claims this session held
+      for (const [k, c] of workClaims) {
+        if (c.sessionId === id) {
+          workClaims.delete(k);
+          log(`Claim cleared on disconnect: ${k}`);
+        }
+      }
+      log(`Session disconnected: ${id.slice(0, 8)} (total: ${sessions.size})`);
     },
   });
 
