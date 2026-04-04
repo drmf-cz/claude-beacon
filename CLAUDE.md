@@ -8,6 +8,23 @@ This file is the authoritative guide for AI agents (Claude Code) working in this
 
 It is **not** a general web server. Every design decision optimises for: minimal attack surface, zero accidental data leaks, and notifications that Claude can act on autonomously.
 
+## Session startup — REQUIRED
+
+**At the start of every session working in this repo, call `set_filter` immediately:**
+
+```
+set_filter(
+  repo: "drmf-cz/claude-beacon",
+  branch: <output of `git branch --show-current`>,
+  label: <same branch name>,
+  worktree_path: <output of `git rev-parse --show-toplevel`>
+)
+```
+
+This registers the session with the running mux server so CI/PR notifications are routed here. Without this call the session is invisible to the mux and all notifications are dropped (they are queued for up to 2 hours, so calling `set_filter` late will still replay missed events).
+
+Call `set_filter` again after checking out a different branch or entering/leaving a worktree.
+
 ## Skills available in this repo
 
 Two skills are defined in `.claude/commands/`. Use them — do not replicate their logic inline.

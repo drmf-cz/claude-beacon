@@ -114,6 +114,66 @@ function claimKeyFor(routing: RoutingKey): string {
 
 const sessions = new Map<string, SessionEntry>();
 
+// ── Pre-registration notification queue ───────────────────────────────────────
+// When a webhook event arrives before any Claude Code session has registered,
+// the notification would normally be dropped. Instead we buffer it here and
+// flush it the moment a session calls set_filter.
+//
+// Why this happens: the mux may restart (clearing sessions) while Claude Code
+// is already running. Claude Code's existing session ID returns 404, but it
+// does not automatically re-initialize until it next calls a tool. The queued
+// notifications bridge that gap.
+
+interface PendingNotification {
+  notification: CINotification;
+  routing: RoutingKey;
+  receivedAt: number;
+}
+
+/** Events queued while no session was registered. Keyed by repo ("owner/repo"). */
+const pendingByRepo = new Map<string, PendingNotification[]>();
+
+/** How long a queued notification stays relevant before being discarded. */
+const PENDING_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+function enqueuePending(routing: RoutingKey, notification: CINotification): void {
+  const key = routing.repo ?? "*";
+  const now = Date.now();
+  const existing = (pendingByRepo.get(key) ?? []).filter(
+    (n) => now - n.receivedAt < PENDING_TTL_MS,
+  );
+  existing.push({ notification, routing, receivedAt: now });
+  pendingByRepo.set(key, existing);
+  log(
+    `Queued for replay (no session): ${routing.repo}@${routing.branch ?? "*"} — queue depth: ${existing.length}`,
+  );
+}
+
+async function flushPendingToSession(repo: string | null, session: SessionEntry): Promise<void> {
+  const keys = repo !== null ? [repo] : [...pendingByRepo.keys()];
+  const now = Date.now();
+  for (const key of keys) {
+    const pending = pendingByRepo.get(key);
+    if (!pending || pending.length === 0) continue;
+    const fresh = pending.filter((n) => now - n.receivedAt < PENDING_TTL_MS);
+    if (fresh.length === 0) {
+      pendingByRepo.delete(key);
+      continue;
+    }
+    log(`Flushing ${fresh.length} queued notification(s) for ${key} to newly registered session`);
+    for (const { notification, routing } of fresh) {
+      const claimKey = claimKeyFor(routing);
+      const enriched = enrichNotification(notification, claimKey, "normal");
+      try {
+        await sendChannelNotification(session.server, enriched);
+      } catch (err) {
+        log(`Failed to flush pending notification for ${key}:`, err);
+      }
+    }
+    pendingByRepo.delete(key);
+  }
+}
+
 // ── Session TTL ───────────────────────────────────────────────────────────────
 // Streamable HTTP has no persistent connection, so onsessionclosed is not
 // reliably called when Claude Code exits or context-resets. Without this cleanup
@@ -275,9 +335,10 @@ const routeToSessions: NotifyFn = async (
   if (recipients.length === 0) {
     const registered = [...sessions.values()].map((s) => `${s.repo ?? "*"}@${s.branch ?? "*"}`);
     log(
-      `No session found for ${routing.repo} — notification dropped.`,
+      `No session found for ${routing.repo} — queuing for replay.`,
       `Registered: [${registered.join(", ") || "none"}]`,
     );
+    enqueuePending(routing, notification);
     return;
   }
 
@@ -362,6 +423,12 @@ function createSession(): {
       log(
         `Filter set → ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"} path=${worktree_path ?? "-"}`,
       );
+      // Flush any notifications that arrived before this session registered.
+      // This covers the race where the mux restarted (clearing sessions) while
+      // Claude Code was already running and hadn't yet called set_filter.
+      if (entry) {
+        await flushPendingToSession(repo, entry);
+      }
       return {
         content: [
           {
