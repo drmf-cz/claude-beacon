@@ -126,9 +126,7 @@ setInterval(
     for (const [id, session] of sessions) {
       if (now - session.lastActivityAt > SESSION_IDLE_TTL_MS) {
         sessions.delete(id);
-        log(
-          `Session ${id.slice(0, 8)} idle >30 min — removed (total: ${sessions.size})`,
-        );
+        log(`Session ${id.slice(0, 8)} idle >30 min — removed (total: ${sessions.size})`);
         // Clean up any stale claims owned by this session
         for (const [k, c] of workClaims) {
           if (c.sessionId === id) {
@@ -165,8 +163,7 @@ function selectRecipients(
   // Tier 1+2: exact branch match OR wildcard branch, for this repo
   const primary = [...sessionMap.values()].filter(
     (s) =>
-      forRepo(s) &&
-      (s.branch === null || routing.branch === null || s.branch === routing.branch),
+      forRepo(s) && (s.branch === null || routing.branch === null || s.branch === routing.branch),
   );
 
   if (primary.length > 0) {
@@ -285,7 +282,9 @@ const routeToSessions: NotifyFn = async (
   }
 
   if (mode === "catchall") {
-    log(`⚠️  No session on ${routing.branch ?? "*"} — using catch-all (${recipients.length} sessions)`);
+    log(
+      `⚠️  No session on ${routing.branch ?? "*"} — using catch-all (${recipients.length} sessions)`,
+    );
   }
 
   const enriched = enrichNotification(notification, claimKey, mode);
