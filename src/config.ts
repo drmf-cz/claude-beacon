@@ -14,6 +14,12 @@ export interface ServerConfig {
   max_events_per_window: number;
   /** Branch names treated as the default/main branch for CI failure escalation. */
   main_branches: string[];
+  /**
+   * How long a work-context claim holds before expiring (milliseconds).
+   * Claims are auto-renewed when the owner calls claim_notification again.
+   * Default: 10 minutes.
+   */
+  claim_ttl_ms: number;
 }
 
 export interface WebhooksConfig {
@@ -145,6 +151,7 @@ export const DEFAULT_CONFIG: Config = {
     cooldown_ms: 5 * 60 * 1000,
     max_events_per_window: 50,
     main_branches: ["main", "master"],
+    claim_ttl_ms: 10 * 60 * 1000,
   },
   webhooks: {
     allowed_authors: [],
