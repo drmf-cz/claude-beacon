@@ -138,6 +138,24 @@ export interface PRStateBehavior {
   instruction: string;
 }
 
+export type DependabotMinSeverity = "low" | "medium" | "high" | "critical";
+export type CodeScanningMinSeverity = "note" | "warning" | "error";
+
+export interface SecurityAlertBehavior<S extends string> {
+  /**
+   * Minimum severity required to trigger a notification.
+   * Alerts below this threshold are silently skipped.
+   */
+  min_severity: S;
+  /**
+   * Instruction template appended to security alert notifications.
+   *
+   * Dependabot placeholders: {repo}, {cve}, {package}, {severity}, {alert_url}, {patched_version}
+   * Code scanning placeholders: {repo}, {rule}, {severity}, {alert_url}, {branch}, {tool}
+   */
+  instruction: string;
+}
+
 export interface BehaviorConfig {
   /** Worktree strategy for all subagent operations. */
   worktrees: WorktreeConfig;
@@ -151,6 +169,10 @@ export interface BehaviorConfig {
   on_merge_conflict: PRStateBehavior;
   /** Behaviour when a PR is behind its base branch (mergeable_state=behind). */
   on_branch_behind: PRStateBehavior;
+  /** Behaviour when a Dependabot security alert is created or reintroduced. */
+  on_dependabot_alert: SecurityAlertBehavior<DependabotMinSeverity>;
+  /** Behaviour when a code scanning (SAST) alert is created. */
+  on_code_scanning_alert: SecurityAlertBehavior<CodeScanningMinSeverity>;
 }
 
 export interface Config {
@@ -250,6 +272,25 @@ export const DEFAULT_CONFIG: Config = {
         "Use the Agent tool NOW to spawn a subagent with these instructions:",
         "Rebase PR #{pr_number} in {repo}:",
         "{worktree_steps}",
+      ].join("\n"),
+    },
+    on_dependabot_alert: {
+      min_severity: "medium",
+      instruction: [
+        "🚨 Dependabot alert on {repo}: {severity} vulnerability in {package} ({cve})",
+        "Patched in: {patched_version}",
+        "Details: {alert_url}",
+        "",
+        "Review the alert and update the dependency to the patched version.",
+      ].join("\n"),
+    },
+    on_code_scanning_alert: {
+      min_severity: "warning",
+      instruction: [
+        "🔍 Code scanning alert on {repo} ({branch}): {rule} [{severity}] via {tool}",
+        "Details: {alert_url}",
+        "",
+        "Review the finding and apply a fix.",
       ].join("\n"),
     },
   },
