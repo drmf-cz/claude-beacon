@@ -86,7 +86,7 @@ export function sanitizeBody(body: string, maxLen = 500): string {
       .replaceAll("\x00", "") // strip null bytes
       // strip Unicode bidi-override and zero-width characters used to hide injected text
       .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
-      .replace(/[\r\n\t]+/g, " ") // collapse runs of whitespace
+      .replace(/[\r\n\t\u2028\u2029]+/g, " ") // collapse runs of whitespace + Unicode line/para separators
       .trim()
       .slice(0, maxLen)
   );
@@ -694,7 +694,7 @@ export function parseReviewWebhookPayload(
     return {
       reviewEvent: {
         type: "review",
-        reviewer: review.user.login,
+        reviewer: sanitizeBody(review.user.login, 100),
         state: review.state,
         body: sanitizeBody(review.body ?? "(no review body)"),
         url: review.html_url,
@@ -715,7 +715,7 @@ export function parseReviewWebhookPayload(
     return {
       reviewEvent: {
         type: "review_comment",
-        reviewer: comment.user.login,
+        reviewer: sanitizeBody(comment.user.login, 100),
         body: sanitizeBody(comment.body),
         url: comment.html_url,
         path: comment.path,
@@ -737,7 +737,7 @@ export function parseReviewWebhookPayload(
     return {
       reviewEvent: {
         type: "issue_comment",
-        reviewer: comment.user.login,
+        reviewer: sanitizeBody(comment.user.login, 100),
         body: sanitizeBody(comment.body),
         url: comment.html_url,
       },
@@ -758,7 +758,7 @@ export function parseReviewWebhookPayload(
     return {
       reviewEvent: {
         type: "unresolved_thread",
-        reviewer: payload.sender?.login ?? firstComment.user.login,
+        reviewer: sanitizeBody(payload.sender?.login ?? firstComment.user.login, 100),
         body: sanitizeBody(firstComment.body),
         url: firstComment.html_url,
         path: firstComment.path,

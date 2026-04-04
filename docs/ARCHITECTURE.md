@@ -32,7 +32,7 @@ Two transports share a single Bun process: **HTTP** on `WEBHOOK_PORT` (default 9
 
 **LRU delivery ID cache (1 000 entries)** — `isDuplicateDelivery()` deduplicates retried webhooks via `X-GitHub-Delivery`. At 1 000 entries the oldest is evicted. Covers typical retry windows (a few minutes, far fewer than 1 000 events) with minimal memory.
 
-**10 MB payload limit** — `isOversized()` rejects bodies before parsing. Generous enough for large matrix-job payloads (real-world max ~hundreds of KB), prevents memory exhaustion from malicious clients.
+**20 MB payload limit** — `isOversized()` rejects bodies before parsing. Raised from 10 MB when real-world PR review payloads on large matrix-job repos approached the original limit. Prevents memory exhaustion from malicious clients.
 
 **Notifications as directives, not alerts** — `CINotification.content` is injected verbatim into Claude's session. Passive language ("CI failed") produced no action; imperative language with explicit Agent tool instructions produces autonomous response. Users who prefer review-before-action should customise the instruction templates.
 
@@ -48,6 +48,10 @@ Two transports share a single Bun process: **HTTP** on `WEBHOOK_PORT` (default 9
 
 **Mux mode (Streamable HTTP)** — a single `claude-beacon-mux` process on `:9444` serves all Claude Code sessions. The original per-session stdio design made webhook routing impossible without a hub process. The mux requires a persistent process (systemd or similar) but eliminates that complexity.
 
+**NotificationEventStore — SSE reconnect recovery** — the mux buffers the last 50 notifications per stream keyed by event ID (`${streamId}_${timestamp}_${random}`). On reconnect, the session sends `Last-Event-ID` and the store replays any events it missed. Without this, a Claude Code session that briefly lost its SSE connection would silently miss CI notifications.
+
+**Work-context claims — multi-session coordination** — when a CI event is routed to multiple sessions (catch-all delivery), each session calls `claim_notification(key)`. The first to call gets `"ok"`; the rest get `"conflict:X"` and stand down. Claims expire after `claim_ttl_ms` (default 10 min). This prevents two Claude sessions from concurrently pushing conflicting fixes to the same branch. Session labels (set via `set_filter`) are stored in the claim to produce human-readable conflict messages.
+
 **`fetch_workflow_logs` manual redirect** — GitHub Actions log URLs return HTTP 302 to a presigned S3 URL that rejects `Authorization` headers. We capture the redirect with `redirect: "manual"` and make an unauthenticated request to S3.
 
 ---
@@ -58,7 +62,7 @@ Two transports share a single Bun process: **HTTP** on `WEBHOOK_PORT` (default 9
 |---|---|
 | Forged webhook | HMAC-SHA256, `timingSafeEqual` |
 | Webhook replay | LRU delivery ID deduplication |
-| Memory exhaustion | 10 MB size guard before JSON parse |
+| Memory exhaustion | 20 MB size guard before JSON parse |
 | Prompt injection | `sanitizeBody()` strips null bytes, bidi overrides, truncates |
 | Token exfiltration via redirect | `redirect:"manual"`, unauthenticated S3 fetch |
 | Credential leak in logs | Only 8-char token prefix logged |

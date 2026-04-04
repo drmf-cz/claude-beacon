@@ -25,6 +25,8 @@ src/
 | `parsePullRequestEvent(payload, config)` | `pull_request` dirty/behind → `CINotification` |
 | `parseReviewWebhookPayload(event, action, payload)` | `pull_request_review` / `pull_request_review_comment` / `issue_comment` → `ReviewParsedResult` |
 | `isActionable(event, payload)` | Filters to completed + PR-conflict events only |
+| `categorizeEvent(event)` | Returns `"ci"`, `"review"`, `"push"`, or `"other"` for a webhook event type |
+| `getEventLabel(event, payload)` | Human-readable label for a webhook event (e.g. `"workflow_run: my-workflow"`) |
 | `createMcpServer()` | McpServer with `claude/channel` capability + `fetch_workflow_logs` tool |
 | `startWebhookServer(mcp, config)` | Starts Bun HTTP server |
 

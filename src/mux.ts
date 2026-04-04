@@ -214,7 +214,7 @@ function enrichNotification(
         `  a) Your current branch IS "${branch}":`,
         `     → Fix here in your current directory`,
         `  b) Your current branch IS NOT "${branch}":`,
-        `     → git worktree add /tmp/${branchSlug}-fix ${branch}`,
+        `     → git worktree add /tmp/${branchSlug}-fix ${branchSlug}`,
         `     → Fix in that worktree, commit, push`,
         `     → Call release_claim("${claimKey}") when done`,
         `     → git worktree remove /tmp/${branchSlug}-fix`,
@@ -353,7 +353,7 @@ function createSession(): {
       if (entry) {
         entry.repo = repo;
         entry.branch = branch;
-        entry.label = label ?? null;
+        entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
         entry.worktree_path = worktree_path ?? null;
       }
       if (branch === null) {
@@ -489,7 +489,7 @@ Bun.serve({
     const url = new URL(req.url);
 
     if (url.pathname !== "/mcp") {
-      return new Response(JSON.stringify({ status: "ok", server: "github-ci-mux" }), {
+      return new Response(JSON.stringify({ status: "ok", server: "claude-beacon-mux" }), {
         headers: { "Content-Type": "application/json" },
       });
     }

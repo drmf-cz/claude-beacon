@@ -331,6 +331,24 @@ When the claude-beacon MCP server connects, call `set_filter` immediately with:
 
 For full details — routing rules, systemd setup, comparison table — see **[docs/multi-session.md](docs/multi-session.md)**.
 
+### SSE reconnect recovery
+
+The mux buffers the last 50 notifications per stream using `NotificationEventStore`. If a Claude Code session's SSE connection drops and reconnects, it replays any events it missed via the standard `Last-Event-ID` header — no notifications are lost across reconnects.
+
+### Multi-session coordination — work-context claims
+
+When multiple Claude Code sessions receive the same CI notification (e.g., a catch-all delivery to sessions that are not on the affected branch), they race to claim the work:
+
+```
+call claim_notification("<repo>:<branch>")
+  → "ok"            — you have the lock, proceed
+  → "already_owned" — you already hold it, continue
+  → "conflict:X"    — session X claimed it first, stop
+  → "expired"       — claim timed out, stop
+```
+
+The claim TTL defaults to 10 minutes (`server.claim_ttl_ms: 600000`). Only one session acts; the others receive `conflict:…` and stand down. Claims are released automatically on TTL expiry or explicitly via `release_claim("<key>")`.
+
 ---
 
 ## YAML configuration file
@@ -375,6 +393,7 @@ Environment variables (`WEBHOOK_PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`) 
 | `server.cooldown_ms` | number | `300000` | Suppress duplicate notifications for the same PR within this window |
 | `server.max_events_per_window` | number | `50` | Maximum review events buffered per debounce window |
 | `server.main_branches` | string[] | `["main","master"]` | Branch names treated as production |
+| `server.claim_ttl_ms` | number | `600000` | How long (ms) a work-context claim is held before expiring (mux mode only) |
 
 ### Webhook filters
 
