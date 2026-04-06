@@ -101,6 +101,13 @@ export interface WorktreeConfig {
    * (i.e. you run `claude` from inside an Agent-managed worktree).
    */
   mode: WorktreeMode;
+  /**
+   * Base directory for temporary worktrees created in "temp" mode.
+   * The actual path is {base_dir}/{repo_slug}-pr-{N}-rebase.
+   * Including the repo slug prevents collisions when multiple repos share the same mux.
+   * Default: "/tmp"
+   */
+  base_dir: string;
 }
 
 export interface PRReviewBehavior {
@@ -216,6 +223,7 @@ export const DEFAULT_CONFIG: Config = {
   behavior: {
     worktrees: {
       mode: "temp",
+      base_dir: "/tmp",
     },
     on_ci_failure_main: {
       upstream_sync: true,
@@ -315,13 +323,13 @@ export const DEFAULT_CONFIG: Config = {
  * and on_branch_behind instruction templates.
  */
 export function buildWorktreeRebaseSteps(
-  mode: WorktreeMode,
-  vars: { pr_number: string; head_branch: string; base_branch: string },
+  worktrees: WorktreeConfig,
+  vars: { pr_number: string; head_branch: string; base_branch: string; repo: string },
   withConflicts: boolean,
 ): string {
-  const { pr_number, head_branch, base_branch } = vars;
+  const { pr_number, head_branch, base_branch, repo } = vars;
 
-  if (mode === "native") {
+  if (worktrees.mode === "native") {
     // Claude Code's Agent tool manages the worktree automatically when isolation="worktree"
     // is passed. The subagent starts directly inside the isolated worktree branch.
     const rebaseStep = withConflicts
@@ -335,16 +343,19 @@ export function buildWorktreeRebaseSteps(
     ].join("\n");
   }
 
-  // Default: temp worktree via shell commands
+  // Default: temp worktree via shell commands.
+  // Path includes repo slug to prevent collisions when multiple repos share the same machine.
+  const repoSlug = repo.split("/")[1] ?? repo;
+  const worktreePath = `${worktrees.base_dir}/${repoSlug}-pr-${pr_number}-rebase`;
   const rebaseStep = withConflicts
     ? `3. git rebase origin/${base_branch} — fix conflicts, then: git add -A && git rebase --continue`
     : `3. git rebase origin/${base_branch}`;
   return [
-    `1. git worktree add /tmp/pr-${pr_number}-rebase ${head_branch}`,
-    `2. cd /tmp/pr-${pr_number}-rebase && git fetch origin`,
+    `1. git worktree add ${worktreePath} ${head_branch}`,
+    `2. cd ${worktreePath} && git fetch origin`,
     rebaseStep,
     `4. git push --force-with-lease origin ${head_branch}`,
-    `5. git worktree remove /tmp/pr-${pr_number}-rebase`,
+    `5. git worktree remove ${worktreePath}`,
   ].join("\n");
 }
 

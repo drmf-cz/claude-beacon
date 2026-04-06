@@ -525,10 +525,8 @@ export function parsePullRequestEvent(
     sender: payload.sender?.login ?? "",
   };
 
-  const worktreeMode = config.behavior.worktrees.mode;
-
   if (state === "dirty") {
-    const worktreeSteps = buildWorktreeRebaseSteps(worktreeMode, prVars, true);
+    const worktreeSteps = buildWorktreeRebaseSteps(config.behavior.worktrees, prVars, true);
     const instruction = interpolate(config.behavior.on_merge_conflict.instruction, {
       ...prVars,
       worktree_steps: worktreeSteps,
@@ -548,7 +546,7 @@ export function parsePullRequestEvent(
   // "blocked" = branch is behind but also has failing required checks.
   // Treat as "behind": rebase first, then CI re-runs and may pass.
   if (state === "behind" || state === "blocked") {
-    const worktreeSteps = buildWorktreeRebaseSteps(worktreeMode, prVars, false);
+    const worktreeSteps = buildWorktreeRebaseSteps(config.behavior.worktrees, prVars, false);
     const instruction = interpolate(config.behavior.on_branch_behind.instruction, {
       ...prVars,
       worktree_steps: worktreeSteps,

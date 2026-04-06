@@ -83,9 +83,11 @@ behavior:
   #
   #   mode: temp    (default)
   #     Subagents use classic shell commands:
-  #       git worktree add /tmp/pr-<N>-rebase <branch>
+  #       git worktree add {base_dir}/{repo}-pr-<N>-rebase <branch>
   #       ... do work ...
-  #       git worktree remove /tmp/pr-<N>-rebase
+  #       git worktree remove {base_dir}/{repo}-pr-<N>-rebase
+  #     The repo slug is included in the path to prevent collisions when multiple
+  #     repos share the same machine and both have a PR #42 in flight.
   #
   #   mode: native
   #     Subagents are spawned via Claude Code's Agent tool with isolation="worktree".
@@ -93,6 +95,9 @@ behavior:
   #     Use this if you normally work inside Claude Code native worktrees.
   worktrees:
     mode: temp
+    # Base directory for temporary worktrees (mode: temp only). Default: /tmp
+    # Override if /tmp is too small, on a tmpfs, or shared across users.
+    base_dir: /tmp
   # mode: native  ← uncomment if you use Claude Code native worktrees
 
   # Triggered when a workflow_run fails on a main/master branch.
