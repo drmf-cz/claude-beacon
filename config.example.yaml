@@ -202,6 +202,41 @@ behavior:
       Rebase PR #{pr_number} in {repo}:
       {worktree_steps}
 
+  # Triggered when Dependabot creates or reintroduces a security alert.
+  # Actions "dismissed", "fixed", "auto_dismissed", "auto_reopened" are silently skipped.
+  # Placeholders: {repo}, {cve}, {package}, {severity}, {alert_url}, {patched_version}
+  on_dependabot_alert:
+    # Set to true to activate. Disabled by default to avoid conflicts in team setups
+    # where multiple Claude Code instances are registered for the same repo — security
+    # alerts broadcast to all of them. Enable only on the instance responsible for triage.
+    enabled: false
+
+    # Minimum severity to trigger a notification.
+    # Values: low | medium | high | critical  (default: medium)
+    min_severity: medium
+    instruction: |
+      🚨 Dependabot alert on {repo}: {severity} vulnerability in {package} ({cve})
+      Patched in: {patched_version}
+      Details: {alert_url}
+
+      Review the alert and update the dependency to the patched version.
+
+  # Triggered when a code scanning (SAST) alert is created (e.g. CodeQL finding).
+  # Actions "fixed", "closed_by_user", "reopened" are silently skipped.
+  # Placeholders: {repo}, {rule}, {severity}, {alert_url}, {branch}, {tool}
+  on_code_scanning_alert:
+    # Set to true to activate. Same opt-in rationale as on_dependabot_alert above.
+    enabled: false
+
+    # Minimum severity to trigger a notification.
+    # Values: note | warning | error  (default: warning)
+    min_severity: warning
+    instruction: |
+      🔍 Code scanning alert on {repo} ({branch}): {rule} [{severity}] via {tool}
+      Details: {alert_url}
+
+      Review the finding and apply a fix.
+
 # ── Code style guidelines ─────────────────────────────────────────────────────
 # Free-text block prepended to every PR review notification.
 # Use this to communicate project conventions so the agent applies them

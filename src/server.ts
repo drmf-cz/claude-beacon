@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Config } from "./config.js";
+import type { CodeScanningMinSeverity, Config, DependabotMinSeverity } from "./config.js";
 import {
   buildWorktreePreamble,
   buildWorktreeRebaseSteps,
@@ -10,6 +10,10 @@ import {
 } from "./config.js";
 import type {
   CINotification,
+  CodeScanningAlertPayload,
+  CodeScanningAlertSeverity,
+  DependabotAlertPayload,
+  DependabotAlertSeverity,
   GitHubPushPayload,
   GitHubWebhookPayload,
   IssueComment,
@@ -827,6 +831,143 @@ export function isActionable(event: string, payload: GitHubWebhookPayload): bool
   return (CI_EVENTS.has(event) || event === "check_run") && payload.action === "completed";
 }
 
+// ── Security alert parsers ────────────────────────────────────────────────────
+
+/** Numeric rank used to compare severity thresholds. Higher = more severe. */
+const DEPENDABOT_SEVERITY_RANK: Record<DependabotAlertSeverity, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+};
+
+const CODE_SCANNING_SEVERITY_RANK: Record<CodeScanningAlertSeverity, number> = {
+  none: -1,
+  note: 0,
+  warning: 1,
+  error: 2,
+};
+
+/**
+ * Parse a `dependabot_alert` webhook payload into a notification.
+ * Returns null when the action is not actionable or the severity is below min_severity.
+ */
+export function parseDependabotAlertEvent(
+  payload: DependabotAlertPayload,
+  config: Config = DEFAULT_CONFIG,
+): CINotification | null {
+  if (!config.behavior.on_dependabot_alert.enabled) {
+    log(
+      "[skip] dependabot_alert: disabled (set behavior.on_dependabot_alert.enabled=true to activate)",
+    );
+    return null;
+  }
+  if (payload.action !== "created" && payload.action !== "reintroduced") {
+    log(
+      `[skip] dependabot_alert: action=${payload.action} (only "created"/"reintroduced" notifies)`,
+    );
+    return null;
+  }
+
+  const alert = payload.alert;
+  const vuln = alert.security_vulnerability;
+  const severity = vuln.severity;
+  const minSeverity: DependabotMinSeverity = config.behavior.on_dependabot_alert.min_severity;
+
+  if (DEPENDABOT_SEVERITY_RANK[severity] < DEPENDABOT_SEVERITY_RANK[minSeverity]) {
+    log(
+      `[skip] dependabot_alert #${alert.number}: severity=${severity} < min_severity=${minSeverity}`,
+    );
+    return null;
+  }
+
+  const repo = sanitizeBody(payload.repository.full_name, 100);
+  const pkg = sanitizeBody(`${vuln.package.ecosystem}:${vuln.package.name}`, 150);
+  const cve = alert.security_advisory.cve_id ?? "no CVE";
+  const patchedVersion = vuln.first_patched_version?.identifier ?? "none available";
+
+  const vars: Record<string, string> = {
+    repo,
+    cve,
+    package: pkg,
+    severity,
+    alert_url: alert.html_url,
+    patched_version: patchedVersion,
+  };
+
+  const summary = interpolate(config.behavior.on_dependabot_alert.instruction, vars);
+
+  return {
+    summary,
+    meta: {
+      source: "github-ci",
+      event: "dependabot_alert",
+      action: payload.action,
+      repo,
+      severity,
+      alert_url: alert.html_url,
+    },
+  };
+}
+
+/**
+ * Parse a `code_scanning_alert` webhook payload into a notification.
+ * Returns null when the action is not actionable or the severity is below min_severity.
+ */
+export function parseCodeScanningAlertEvent(
+  payload: CodeScanningAlertPayload,
+  config: Config = DEFAULT_CONFIG,
+): CINotification | null {
+  if (!config.behavior.on_code_scanning_alert.enabled) {
+    log(
+      "[skip] code_scanning_alert: disabled (set behavior.on_code_scanning_alert.enabled=true to activate)",
+    );
+    return null;
+  }
+  if (payload.action !== "created") {
+    log(`[skip] code_scanning_alert: action=${payload.action} (only "created" notifies)`);
+    return null;
+  }
+
+  const alert = payload.alert;
+  const severity = alert.rule.severity;
+  const minSeverity: CodeScanningMinSeverity = config.behavior.on_code_scanning_alert.min_severity;
+
+  if (CODE_SCANNING_SEVERITY_RANK[severity] < CODE_SCANNING_SEVERITY_RANK[minSeverity]) {
+    log(
+      `[skip] code_scanning_alert #${alert.number}: severity=${severity} < min_severity=${minSeverity}`,
+    );
+    return null;
+  }
+
+  const repo = sanitizeBody(payload.repository.full_name, 100);
+  const branch = sanitizeBody(alert.most_recent_instance.ref.replace("refs/heads/", ""), 100);
+
+  const vars: Record<string, string> = {
+    repo,
+    branch,
+    rule: sanitizeBody(alert.rule.id, 100),
+    severity,
+    alert_url: alert.html_url,
+    tool: sanitizeBody(alert.tool.name, 100),
+  };
+
+  const summary = interpolate(config.behavior.on_code_scanning_alert.instruction, vars);
+
+  return {
+    summary,
+    meta: {
+      source: "github-ci",
+      event: "code_scanning_alert",
+      action: payload.action,
+      repo,
+      branch,
+      severity,
+      alert_url: alert.html_url,
+    },
+  };
+}
+
 // ── MCP Server ────────────────────────────────────────────────────────────────
 export function createMcpServer(): McpServer {
   const mcp = new McpServer(
@@ -1174,6 +1315,50 @@ function logReviewSkipReason(event: string, payload: GitHubWebhookPayload): void
 }
 
 /**
+ * Handle a security alert event (dependabot_alert or code_scanning_alert).
+ * Returns a non-OK Response on notification failure, or null on success/skip.
+ */
+async function handleSecurityAlertEvent(
+  event: string,
+  payload: GitHubWebhookPayload,
+  config: Config,
+  notify: NotifyFn,
+): Promise<Response | null> {
+  if (event === "dependabot_alert") {
+    const notification = parseDependabotAlertEvent(
+      payload as unknown as DependabotAlertPayload,
+      config,
+    );
+    if (!notification) return null;
+    const routing: RoutingKey = { repo: payload.repository?.full_name ?? "unknown", branch: null };
+    try {
+      await notify(notification, routing);
+    } catch (err) {
+      log("Failed to send dependabot_alert notification:", err);
+      return new Response("Notification failed", { status: 500 });
+    }
+    return null;
+  }
+
+  // code_scanning_alert
+  const notification = parseCodeScanningAlertEvent(
+    payload as unknown as CodeScanningAlertPayload,
+    config,
+  );
+  if (!notification) return null;
+  const csaPayload = payload as unknown as CodeScanningAlertPayload;
+  const branch = csaPayload.alert?.most_recent_instance?.ref?.replace("refs/heads/", "") ?? null;
+  const routing: RoutingKey = { repo: payload.repository?.full_name ?? "unknown", branch };
+  try {
+    await notify(notification, routing);
+  } catch (err) {
+    log("Failed to send code_scanning_alert notification:", err);
+    return new Response("Notification failed", { status: 500 });
+  }
+  return null;
+}
+
+/**
  * Handle a parsed review event: skip own comments, then schedule the debounced
  * notification. Extracted to keep startWebhookServer's fetch handler under the
  * complexity limit.
@@ -1301,6 +1486,13 @@ export function startWebhookServer(
           log(`Push to ${branch} — checking open PRs for merge status`);
           void checkPRsAfterPush(push.repository.full_name, branch, token, notify, config);
         }
+        return new Response("OK", { status: 200 });
+      }
+
+      // ── Security alert events ────────────────────────────────────────────────
+      if (event === "dependabot_alert" || event === "code_scanning_alert") {
+        const secResp = await handleSecurityAlertEvent(event, payload, config, notify);
+        if (secResp) return secResp;
         return new Response("OK", { status: 200 });
       }
 

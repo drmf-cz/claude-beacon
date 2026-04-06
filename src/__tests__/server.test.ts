@@ -9,6 +9,8 @@ import {
   isDuplicateDelivery,
   isInReviewCooldown,
   isOversized,
+  parseCodeScanningAlertEvent,
+  parseDependabotAlertEvent,
   parseReviewWebhookPayload,
   parseWorkflowEvent,
   pendingReviews,
@@ -17,7 +19,11 @@ import {
   scheduleReviewNotification,
   verifySignature,
 } from "../server.js";
-import type { GitHubWebhookPayload } from "../types.js";
+import type {
+  CodeScanningAlertPayload,
+  DependabotAlertPayload,
+  GitHubWebhookPayload,
+} from "../types.js";
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 describe("verifySignature", () => {
@@ -1041,5 +1047,232 @@ describe("createMcpServer — startup resource", () => {
       ._registeredResources;
     expect(resources).toBeDefined();
     expect(Object.keys(resources).some((k) => k.includes("startup"))).toBe(true);
+  });
+});
+
+// ── parseDependabotAlertEvent ─────────────────────────────────────────────────
+describe("parseDependabotAlertEvent", () => {
+  const enabledConfig = {
+    ...DEFAULT_CONFIG,
+    behavior: {
+      ...DEFAULT_CONFIG.behavior,
+      on_dependabot_alert: { ...DEFAULT_CONFIG.behavior.on_dependabot_alert, enabled: true },
+    },
+  };
+
+  const basePayload: DependabotAlertPayload = {
+    action: "created",
+    alert: {
+      number: 1,
+      state: "open",
+      security_vulnerability: {
+        package: { ecosystem: "npm", name: "lodash" },
+        severity: "high",
+        first_patched_version: { identifier: "4.17.21" },
+      },
+      security_advisory: {
+        cve_id: "CVE-2021-23337",
+        summary: "Prototype pollution in lodash",
+        references: [],
+      },
+      html_url: "https://github.com/acme/repo/security/dependabot/1",
+    },
+    repository: { full_name: "acme/repo" },
+  };
+
+  it("returns null when disabled (default)", () => {
+    expect(parseDependabotAlertEvent(basePayload)).toBeNull();
+  });
+
+  it("returns a notification for a created alert above min_severity", () => {
+    const result = parseDependabotAlertEvent(basePayload, enabledConfig);
+    expect(result).not.toBeNull();
+    expect(result?.summary).toContain("acme/repo");
+    expect(result?.summary).toContain("CVE-2021-23337");
+    expect(result?.summary).toContain("npm:lodash");
+    expect(result?.summary).toContain("high");
+    expect(result?.summary).toContain("4.17.21");
+    expect(result?.meta.event).toBe("dependabot_alert");
+  });
+
+  it("returns a notification for a reintroduced alert", () => {
+    const result = parseDependabotAlertEvent(
+      { ...basePayload, action: "reintroduced" },
+      enabledConfig,
+    );
+    expect(result).not.toBeNull();
+    expect(result?.meta.action).toBe("reintroduced");
+  });
+
+  it("returns null for non-actionable actions", () => {
+    expect(
+      parseDependabotAlertEvent({ ...basePayload, action: "dismissed" }, enabledConfig),
+    ).toBeNull();
+    expect(
+      parseDependabotAlertEvent({ ...basePayload, action: "fixed" }, enabledConfig),
+    ).toBeNull();
+    expect(
+      parseDependabotAlertEvent({ ...basePayload, action: "auto_dismissed" }, enabledConfig),
+    ).toBeNull();
+  });
+
+  it("returns null when severity is below min_severity", () => {
+    const lowPayload: DependabotAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        security_vulnerability: {
+          ...basePayload.alert.security_vulnerability,
+          severity: "low",
+        },
+      },
+    };
+    // Default min_severity is "medium" — "low" should be skipped
+    expect(parseDependabotAlertEvent(lowPayload, enabledConfig)).toBeNull();
+  });
+
+  it("includes 'none available' when no patched version exists", () => {
+    const noPatchPayload: DependabotAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        security_vulnerability: {
+          ...basePayload.alert.security_vulnerability,
+          first_patched_version: null,
+        },
+      },
+    };
+    expect(parseDependabotAlertEvent(noPatchPayload, enabledConfig)?.summary).toContain(
+      "none available",
+    );
+  });
+
+  it("sanitizes the advisory summary (prompt injection guard)", () => {
+    const injectionPayload: DependabotAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        security_vulnerability: {
+          ...basePayload.alert.security_vulnerability,
+          package: { ecosystem: "npm", name: "evil\x00pkg\u202Ehidden" },
+        },
+      },
+    };
+    const result = parseDependabotAlertEvent(injectionPayload, enabledConfig);
+    expect(result?.summary).not.toContain("\x00");
+    expect(result?.summary).not.toContain("\u202E");
+  });
+
+  it("fires at min_severity threshold (exact match)", () => {
+    const mediumPayload: DependabotAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        security_vulnerability: {
+          ...basePayload.alert.security_vulnerability,
+          severity: "medium",
+        },
+      },
+    };
+    // Default min_severity is "medium" — exact match should notify
+    expect(parseDependabotAlertEvent(mediumPayload, enabledConfig)).not.toBeNull();
+  });
+});
+
+// ── parseCodeScanningAlertEvent ───────────────────────────────────────────────
+describe("parseCodeScanningAlertEvent", () => {
+  const enabledConfig = {
+    ...DEFAULT_CONFIG,
+    behavior: {
+      ...DEFAULT_CONFIG.behavior,
+      on_code_scanning_alert: { ...DEFAULT_CONFIG.behavior.on_code_scanning_alert, enabled: true },
+    },
+  };
+
+  const basePayload: CodeScanningAlertPayload = {
+    action: "created",
+    alert: {
+      number: 5,
+      state: "open",
+      rule: {
+        id: "js/sql-injection",
+        description: "SQL query built from user-controlled sources",
+        severity: "error",
+      },
+      tool: { name: "CodeQL" },
+      html_url: "https://github.com/acme/repo/security/code-scanning/5",
+      most_recent_instance: { ref: "refs/heads/feat/my-feature" },
+    },
+    repository: { full_name: "acme/repo" },
+  };
+
+  it("returns null when disabled (default)", () => {
+    expect(parseCodeScanningAlertEvent(basePayload)).toBeNull();
+  });
+
+  it("returns a notification for a created alert above min_severity", () => {
+    const result = parseCodeScanningAlertEvent(basePayload, enabledConfig);
+    expect(result).not.toBeNull();
+    expect(result?.summary).toContain("acme/repo");
+    expect(result?.summary).toContain("js/sql-injection");
+    expect(result?.summary).toContain("error");
+    expect(result?.summary).toContain("CodeQL");
+    expect(result?.meta.branch).toBe("feat/my-feature");
+    expect(result?.meta.event).toBe("code_scanning_alert");
+  });
+
+  it("returns null for non-actionable actions", () => {
+    expect(
+      parseCodeScanningAlertEvent({ ...basePayload, action: "fixed" }, enabledConfig),
+    ).toBeNull();
+    expect(
+      parseCodeScanningAlertEvent({ ...basePayload, action: "closed_by_user" }, enabledConfig),
+    ).toBeNull();
+  });
+
+  it("returns null when severity is below min_severity", () => {
+    const notePayload: CodeScanningAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        rule: { ...basePayload.alert.rule, severity: "note" },
+      },
+    };
+    // Default min_severity is "warning" — "note" should be skipped
+    expect(parseCodeScanningAlertEvent(notePayload, enabledConfig)).toBeNull();
+  });
+
+  it("fires at min_severity threshold (exact match)", () => {
+    const warningPayload: CodeScanningAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        rule: { ...basePayload.alert.rule, severity: "warning" },
+      },
+    };
+    expect(parseCodeScanningAlertEvent(warningPayload, enabledConfig)).not.toBeNull();
+  });
+
+  it("strips refs/heads/ prefix from branch in meta", () => {
+    const result = parseCodeScanningAlertEvent(basePayload, enabledConfig);
+    expect(result?.meta.branch).toBe("feat/my-feature");
+    expect(result?.meta.branch).not.toContain("refs/heads/");
+  });
+
+  it("sanitizes rule id (prompt injection guard)", () => {
+    const injectionPayload: CodeScanningAlertPayload = {
+      ...basePayload,
+      alert: {
+        ...basePayload.alert,
+        rule: {
+          ...basePayload.alert.rule,
+          id: "evil\x00rule\u202Ehidden",
+          severity: "error",
+        },
+      },
+    };
+    const result = parseCodeScanningAlertEvent(injectionPayload, enabledConfig);
+    expect(result?.summary).not.toContain("\x00");
+    expect(result?.summary).not.toContain("\u202E");
   });
 });
