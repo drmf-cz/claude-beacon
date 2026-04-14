@@ -176,6 +176,14 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 }
 ```
 
+### GitHub App (recommended for teams / multiple repos)
+
+Instead of registering a webhook in each repository, create a GitHub App once and install it at the org (or user) level. Every repo covered automatically — no per-repo webhook setup.
+
+Trade-offs vs per-repo webhooks: initial setup takes ~5 minutes, but new repos are covered automatically and a single stable webhook URL replaces per-repo configuration.
+
+See [docs/github-app.md](docs/github-app.md) for the full setup guide.
+
 ---
 
 ## Multi-session coordination
