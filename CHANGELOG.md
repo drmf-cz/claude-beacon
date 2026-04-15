@@ -47,6 +47,7 @@
 - `on_pr_review` default: set `use_worktree: false` (was `true`) — the old default injected a false "You are running inside an isolated Claude Code worktree" preamble into the notification even though the receiving session is a normal session, not a worktree. This contradicted the claim block that follows (which tells Claude to check its branch and maybe create a worktree), causing Claude to stall without acting.
 - `on_pr_review` instruction: replace "Plan before acting" language with "Act immediately — no confirmation needed." to match the directive style of other event handlers and prevent unintended plan-mode activation.
 - Remove dead `require_plan` field from `PRReviewBehavior` interface and defaults (it was documented to add an `EnterPlanMode` directive but was never wired into instruction building).
+- **Hub `allowed_authors` mutation**: `config.webhooks.allowed_authors` was being assigned directly on the result of `deepMerge`, which shares nested object references with `DEFAULT_CONFIG`. Fixed by cloning both levels with spread so `DEFAULT_CONFIG` is never mutated.
 
 ## [1.8.3] — 2026-04-15
 
@@ -54,10 +55,6 @@
 - **Hub `--author` mode**: `claude-beacon-hub --author YourGitHubUsername` now works without a YAML config file. Hub derives a stable Bearer token from `GITHUB_WEBHOOK_SECRET` via HMAC-SHA256 (`hmac(secret, "hub-token:<username>")`), prints the exact `claude mcp add --header "Authorization: Bearer <token>"` command on startup, and builds an in-memory single-user config. Token is deterministic across restarts — Claude Code only needs to be reconfigured when the webhook secret is rotated.
 - **Hub as default Quickstart path**: README Quickstart now uses `claude-beacon-hub --author` (steps 5–6) instead of mux. Hub provides Bearer token auth, per-user/per-session behavior config, fallback worker, and scales to teams without reconfiguration.
 - **Mux documentation extracted**: Full mux setup (start command, connect Claude Code, `allowed_authors` config) moved to `docs/mux-mode.md`. README "Other deployment modes" links there.
-
-### Bug fixes
-- **Hub `allowed_authors` mutation**: `config.webhooks.allowed_authors` was being assigned directly on the result of `deepMerge`, which shares nested object references with `DEFAULT_CONFIG`. Fixed by cloning both levels with spread (`{ ...config, webhooks: { ...config.webhooks, allowed_authors: [...] } }`) so `DEFAULT_CONFIG` is never mutated. Applied to both `--config` and `--author` paths.
-- **`config.example.yaml`**: update startup example from `claude-beacon-mux --config` to `claude-beacon-hub --config`.
 
 ### Documentation
 - README Quickstart: replace mux steps 5–6 with hub `--author` steps; update `.env` location note
