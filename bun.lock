@@ -5,6 +5,7 @@
     "": {
       "name": "claude-code-github-ci-channel",
       "dependencies": {
+        "@anthropic-ai/sdk": "^0.55.0",
         "@modelcontextprotocol/sdk": "^1.10.2",
         "yaml": "^2.8.3",
         "zod": "^4.3.6",
@@ -17,6 +18,8 @@
     },
   },
   "packages": {
+    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.55.1", "", { "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-gjOMS4chmm8BxClKmCjNHmvf1FrO1Cn++CSX6K3YCZjz5JG4I9ZttQ/xEH4FBsz6HQyZvnUpiKlOAkmxaGmEaQ=="],
+
     "@biomejs/biome": ["@biomejs/biome@2.4.10", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.4.10", "@biomejs/cli-darwin-x64": "2.4.10", "@biomejs/cli-linux-arm64": "2.4.10", "@biomejs/cli-linux-arm64-musl": "2.4.10", "@biomejs/cli-linux-x64": "2.4.10", "@biomejs/cli-linux-x64-musl": "2.4.10", "@biomejs/cli-win32-arm64": "2.4.10", "@biomejs/cli-win32-x64": "2.4.10" }, "bin": { "biome": "bin/biome" } }, "sha512-xxA3AphFQ1geij4JTHXv4EeSTda1IFn22ye9LdyVPoJU19fNVl0uzfEuhsfQ4Yue/0FaLs2/ccVi4UDiE7R30w=="],
 
     "@biomejs/cli-darwin-arm64": ["@biomejs/cli-darwin-arm64@2.4.10", "", { "os": "darwin", "cpu": "arm64" }, "sha512-vuzzI1cWqDVzOMIkYyHbKqp+AkQq4K7k+UCXWpkYcY/HDn1UxdsbsfgtVpa40shem8Kax4TLDLlx8kMAecgqiw=="],

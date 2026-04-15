@@ -29,7 +29,7 @@ Built on the [Claude Code Channels API](https://docs.anthropic.com/en/docs/claud
 
 ## Quickstart
 
-The fastest path is **mux mode**: one persistent server, any number of Claude Code sessions.
+The fastest path is **mux mode** with a **GitHub App**: one App installation covers your entire org, and one persistent mux process handles all Claude Code sessions.
 
 **Requirements:** [Bun](https://bun.sh) ≥ 1.1.0 · Claude Code ≥ 2.1.80 · [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or [ngrok](https://ngrok.com)
 
@@ -57,15 +57,30 @@ cloudflared tunnel --url http://localhost:9443
 # → prints: https://random-name.trycloudflare.com  ← copy this URL
 ```
 
-Keep the tunnel running. The URL changes on restart — update the GitHub webhook Payload URL when that happens. For a stable URL: [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) or [ngrok static domain](https://ngrok.com/blog-post/free-static-domains-ngrok-users).
+Keep the tunnel running. For a stable URL that survives restarts (recommended): [cloudflared named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) or [ngrok static domain](https://ngrok.com/blog-post/free-static-domains-ngrok-users).
 
-### 4. Register the webhook on GitHub
+### 4. Create and install a GitHub App
 
-Repo → **Settings → Webhooks → Add webhook**:
-- **Payload URL** — paste the tunnel URL
-- **Content type** — `application/json`
-- **Secret** — paste the webhook secret from step 2
-- **Events** — select individually: Workflow runs, Workflow jobs, Check suites, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes
+A GitHub App registers the webhook once at the org level — every repository is covered automatically.
+
+Go to **github.com/settings/apps → New GitHub App** (or **your-org → Settings → Developer settings → GitHub Apps**) and fill in:
+
+| Field | Value |
+|---|---|
+| **GitHub App name** | `claude-beacon` (or any name) |
+| **Webhook → Active** | ✓ checked |
+| **Webhook URL** | Your tunnel URL from step 3 |
+| **Webhook secret** | The secret from step 2 |
+
+Under **Repository permissions** set these to **Read-only**: Actions, Pull requests, Issues, Contents (and optionally Code scanning alerts, Dependabot alerts).
+
+Under **Subscribe to events** tick: Workflow runs, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes.
+
+Click **Create GitHub App**, then **Install App** → choose your account or org → **All repositories** → **Install**.
+
+See [docs/github-app.md](docs/github-app.md) for the full guide including permission details, event list, and webhook URL update commands.
+
+> **Single-repo alternative:** If you only need one repository, skip the GitHub App and [register a webhook directly in that repo](#per-repo-webhook-single-repository) instead.
 
 ### 5. Start the mux
 
@@ -91,7 +106,7 @@ claude --dangerously-load-development-channels server:claude-beacon
 
 You should see: `Listening for channel messages from: server:claude-beacon`
 
-**Verify:** Repo → Settings → Webhooks → Recent Deliveries. Trigger a push — green ✓ means it's working. In Claude, watch for `[claude-beacon]` log lines.
+**Verify:** App settings → **Advanced → Recent Deliveries**. Trigger a push — green ✓ means it's working. In Claude, watch for `[claude-beacon]` log lines.
 
 ### 8. Authorize automatic actions
 
@@ -137,6 +152,22 @@ When the claude-beacon MCP server connects, call `set_filter` immediately with:
 
 ## Other deployment modes
 
+### Per-repo webhook (single repository) {#per-repo-webhook-single-repository}
+
+If you only need one repository, skip the GitHub App and register a webhook directly in that repo's settings.
+
+Follow steps 1–3 of the Quickstart (install, secrets, tunnel), then:
+
+Repo → **Settings → Webhooks → Add webhook**:
+- **Payload URL** — paste the tunnel URL
+- **Content type** — `application/json`
+- **Secret** — paste the webhook secret from step 2
+- **Events** — select individually: Workflow runs, Workflow jobs, Check suites, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes
+
+Then continue with Quickstart steps 5–9 (start mux, connect Claude, etc.).
+
+The only difference from the GitHub App path: webhook URL must be updated manually when the tunnel restarts; new repos require a separate webhook registration.
+
 ### Standalone (single Claude session)
 
 If you only ever run one Claude Code window, skip the mux and let Claude Code spawn the server as a subprocess. Add to `~/.mcp.json` or `.mcp.json` in your project:
@@ -176,13 +207,70 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 }
 ```
 
-### GitHub App (recommended for teams / multiple repos)
+### Hub mode (company-wide, multi-user)
 
-Instead of registering a webhook in each repository, create a GitHub App once and install it at the org (or user) level. Every repo covered automatically — no per-repo webhook setup.
+Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
 
-Trade-offs vs per-repo webhooks: initial setup takes ~5 minutes, but new repos are covered automatically and a single stable webhook URL replaces per-repo configuration.
+**No `--author` flag** — in hub mode your GitHub identity comes from your Bearer token, not a CLI flag.
 
-See [docs/github-app.md](docs/github-app.md) for the full setup guide.
+#### Minimal single-user setup
+
+Good for a single developer who wants Bearer token auth (or plans to add teammates later):
+
+**1. Generate a token and create a minimal config:**
+
+```bash
+bun add -g claude-beacon
+TOKEN=$(openssl rand -hex 32)
+echo "Your token: $TOKEN"
+
+cat > hub-config.yaml << EOF
+hub:
+  users:
+    - github_username: YourGitHubUsername
+      token: "$TOKEN"
+EOF
+```
+
+**2. Start the hub** (same machine as Claude Code — no reverse proxy needed):
+
+```bash
+GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
+  claude-beacon-hub --config hub-config.yaml
+```
+
+**3. Update your MCP config** (replaces the old `claude mcp add` command from mux mode):
+
+```bash
+# Remove old mux entry if present
+claude mcp remove claude-beacon
+
+# Add hub entry with your Bearer token
+claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+Or edit `~/.mcp.json` directly:
+
+```json
+{
+  "mcpServers": {
+    "claude-beacon": {
+      "url": "http://127.0.0.1:9444/mcp",
+      "type": "http",
+      "headers": { "Authorization": "Bearer <your-token>" }
+    }
+  }
+}
+```
+
+**4. Start Claude Code and register the session filter** — same as the Quickstart (steps 7–9).
+
+The hub confirms: `Filter registered for @YourGitHubUsername: owner/repo@feat/branch.`
+
+#### Team / company setup
+
+For a shared instance accessible to the whole org, add a reverse proxy (nginx or Caddy) for TLS and point the `url` at your HTTPS endpoint. Each teammate gets their own token entry in `hub:users`. See [docs/hub-mode.md](docs/hub-mode.md) for the full setup guide including reverse proxy config, systemd, fallback worker, and daemon sessions.
 
 ---
 
@@ -317,9 +405,9 @@ Use the absolute path in `.mcp.json`: `"command": "/home/you/.bun/bin/bun"`. Fin
 The CLAUDE.md permissions block is missing — add it as described in [Quickstart step 8](#8-authorize-automatic-actions).
 
 **No notifications ever arrive — checklist**
-1. Webhook Recent Deliveries → green ✓? If not, secret or URL is wrong.
-2. Tunnel still running? Restart = new URL → update GitHub Payload URL.
-3. All 9 event types ticked in webhook settings?
+1. App → **Advanced → Recent Deliveries** → green ✓? If not, secret or URL is wrong.
+2. Tunnel still running? Restart = new URL → update the App's Webhook URL in settings.
+3. All required event types subscribed in App settings?
 4. `--author` exactly matches the GitHub login of the PR author (case-sensitive).
 5. Claude Code started with `--dangerously-load-development-channels server:claude-beacon`.
 6. In mux mode: `set_filter` called in the session?
