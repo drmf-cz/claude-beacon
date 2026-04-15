@@ -2,7 +2,7 @@
 #
 # All fields are optional — omitted fields keep their default values.
 # Pass this file at startup:
-#   claude-beacon-mux --config /path/to/this-file.yaml
+#   claude-beacon-hub --config /path/to/this-file.yaml
 # Or in .mcp.json args:
 #   "args": ["--config", "/path/to/this-file.yaml"]
 #

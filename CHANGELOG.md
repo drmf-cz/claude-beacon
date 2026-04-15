@@ -55,6 +55,10 @@
 - **Hub as default Quickstart path**: README Quickstart now uses `claude-beacon-hub --author` (steps 5–6) instead of mux. Hub provides Bearer token auth, per-user/per-session behavior config, fallback worker, and scales to teams without reconfiguration.
 - **Mux documentation extracted**: Full mux setup (start command, connect Claude Code, `allowed_authors` config) moved to `docs/mux-mode.md`. README "Other deployment modes" links there.
 
+### Bug fixes
+- **Hub `allowed_authors` mutation**: `config.webhooks.allowed_authors` was being assigned directly on the result of `deepMerge`, which shares nested object references with `DEFAULT_CONFIG`. Fixed by cloning both levels with spread (`{ ...config, webhooks: { ...config.webhooks, allowed_authors: [...] } }`) so `DEFAULT_CONFIG` is never mutated. Applied to both `--config` and `--author` paths.
+- **`config.example.yaml`**: update startup example from `claude-beacon-mux --config` to `claude-beacon-hub --config`.
+
 ### Documentation
 - README Quickstart: replace mux steps 5–6 with hub `--author` steps; update `.env` location note
 - README Other deployment modes: replace full hub setup subsections with "Scaling to a team" callout + link to `docs/hub-mode.md`; replace mux subsection with one-liner + link to `docs/mux-mode.md`; remove standalone `allowed_authors` section (now a config table row)

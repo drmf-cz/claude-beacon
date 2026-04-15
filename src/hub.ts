@@ -1167,8 +1167,10 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     }
 
     tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
-    config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
-    log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
+    // Clone to avoid mutating DEFAULT_CONFIG's nested webhooks object
+    const hubAuthors = hubConfig.users.map((u) => u.github_username);
+    config = { ...config, webhooks: { ...config.webhooks, allowed_authors: hubAuthors } };
+    log(`Hub users: ${hubAuthors.join(", ")}`);
     const dbPath =
       hubConfig.session_store_path ?? join(dirname(resolve(configPath)), "hub-session-filters.db");
     openFilterStore(dbPath);
@@ -1203,8 +1205,11 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
         notify_via_pr_comment: true,
       },
     };
-    config = { ...DEFAULT_CONFIG };
-    config.webhooks.allowed_authors = [authorArg as string];
+    // Clone to avoid mutating DEFAULT_CONFIG's nested webhooks object
+    config = {
+      ...DEFAULT_CONFIG,
+      webhooks: { ...DEFAULT_CONFIG.webhooks, allowed_authors: [authorArg as string] },
+    };
     tokenMap = new Map([[bearerToken, profile]]);
     openFilterStore(join(process.cwd(), "hub-session-filters.db"));
     log(`Session filter store: ${process.cwd()}/hub-session-filters.db`);
