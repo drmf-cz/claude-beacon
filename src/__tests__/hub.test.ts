@@ -211,6 +211,41 @@ describe("FallbackWorker", () => {
       worker.watch("no-client:key", notification, routing, BOB, "on_pr_review"),
     ).not.toThrow();
   });
+
+  it("watch() proceeds when user has per-user anthropic_api_key (no hub-wide client needed)", () => {
+    // Hub has no ANTHROPIC_API_KEY, but user has their own key
+    const worker = new FallbackWorker({
+      ...hubCfg,
+      fallback: { ...hubCfg.fallback, enabled: true },
+    });
+    const bobWithKey: typeof BOB = {
+      ...BOB,
+      fallback: { ...BOB.fallback, anthropic_api_key: "sk-ant-user-key" },
+    };
+    // Should not throw — per-user key bypasses the missing hub client check
+    expect(() =>
+      worker.watch("per-user-key:key", notification, routing, bobWithKey, "on_pr_review"),
+    ).not.toThrow();
+    // Clean up timer
+    worker.cancel("per-user-key:key");
+  });
+
+  it("watch() is a no-op when globally disabled even if user has anthropic_api_key", () => {
+    const bobWithKey: typeof BOB = {
+      ...BOB,
+      fallback: { enabled: false, anthropic_api_key: "sk-ant-user-key" },
+    };
+    const worker = new FallbackWorker({
+      ...hubCfg,
+      fallback: { ...hubCfg.fallback, enabled: false },
+    });
+    // fallback.enabled=false at both levels → no-op regardless of key
+    expect(() =>
+      worker.watch("disabled:key", notification, routing, bobWithKey, "on_pr_review"),
+    ).not.toThrow();
+    // No entry should have been added (cancel is a no-op)
+    worker.cancel("disabled:key");
+  });
 });
 
 // ── loadHubConfig ─────────────────────────────────────────────────────────────

@@ -238,7 +238,7 @@ When a user is offline and their sessions are unresponsive, the fallback worker:
 3. Posts a PR comment summarising what was done (if `notify_via_pr_comment: true`)
 4. Queues a summary notification for when the user reconnects
 
-Requires `ANTHROPIC_API_KEY` in the environment. The model can be configured per-hub (`fallback.model`).
+Requires `ANTHROPIC_API_KEY` in the environment (hub-wide) or `fallback.anthropic_api_key` per user. The model can be configured per-hub (`fallback.model`).
 
 **Example PR comment:**
 ```
@@ -247,6 +247,27 @@ Requires `ANTHROPIC_API_KEY` in the environment. The model can be configured per
 > Rebased feat/auth onto main — conflicts resolved in auth/middleware.ts.
 > Full response posted above.
 ```
+
+### Per-user credentials (recommended)
+
+By default, the fallback uses the hub's shared `ANTHROPIC_API_KEY` and `GITHUB_TOKEN`. This means:
+- Anthropic API usage is billed to the hub owner's account
+- PR comments appear as the hub's GitHub bot account
+
+To have the fallback act with a user's own identity, configure per-user credentials:
+
+```yaml
+hub:
+  users:
+    - github_username: alice
+      token: "tok_alice_abc123"
+      fallback:
+        enabled: true
+        anthropic_api_key: "sk-ant-api03-alice..."  # billed to Alice's Anthropic account
+        github_token: "ghp_alice..."                # PR comments posted as Alice
+```
+
+With `github_token` set, the PR comment is posted by Alice's own GitHub account — not the hub bot.
 
 To disable fallback entirely for a user:
 
@@ -261,6 +282,29 @@ hub:
 
 ---
 
+## Daemon session (identity-preserving alternative to API fallback)
+
+The cleanest way to handle offline work is a **daemon session** — a persistent headless Claude Code instance that Alice keeps running on her machine or a cloud VM, connected to the hub with a wildcard filter:
+
+```bash
+# Alice's always-on daemon session
+claude --dangerously-load-development-channels server:claude-beacon
+# On startup, call set_filter with nulls — catch everything for this user
+set_filter(repo=null, branch=null, label="daemon")
+```
+
+With `repo=null, branch=null`, this session receives any notification routed to Alice that no more specific session claims. The hub routes there (Tier-3 catch-all for Alice) instead of ever reaching the Anthropic API fallback.
+
+**Why this is better than the API fallback:**
+- Work is done by Alice's own Claude Code (her claude.ai account, her git credentials, her billing)
+- No API keys need to be shared with the hub admin
+- The session has Alice's full context, CLAUDE.md, and tool configuration
+- Identity binding is natural — the session authenticated with Alice's Bearer token
+
+The API fallback remains as a safety net for the case where even the daemon session is unresponsive.
+
+---
+
 ## Security notes
 
 ### Token security
@@ -269,6 +313,11 @@ hub:
 - Rotate a token by updating `token:` in the YAML and restarting the hub; old token immediately rejected
 - Tokens are never logged (only 8-char prefix of GITHUB_TOKEN is logged, not user tokens)
 - Each session's `github_username` is bound at connection time from the token — cannot be spoofed by the client
+
+### Per-user credentials
+
+- `fallback.anthropic_api_key` and `fallback.github_token` are stored in the hub config YAML — protect this file like a secrets store
+- Users who prefer not to share credentials with the hub admin should use the daemon session approach instead
 
 ### TLS
 
@@ -288,4 +337,4 @@ webhooks:
 
 ### Fallback worker scope
 
-The fallback worker runs server-side with the hub's `GITHUB_TOKEN` and `ANTHROPIC_API_KEY`. It can post PR comments and read workflow logs but cannot push code (read-only PAT is sufficient for all current operations).
+When using hub-wide credentials, the fallback worker runs with the hub's `GITHUB_TOKEN` and `ANTHROPIC_API_KEY`. When using per-user credentials, it uses each user's own tokens. It can post PR comments and read workflow logs but cannot push code (read-only PAT is sufficient for all current operations).

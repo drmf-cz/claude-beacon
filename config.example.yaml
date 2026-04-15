@@ -308,6 +308,13 @@ code_style: ""
 #       fallback:
 #         enabled: true
 #         timeout_ms: 900000
+#         # Optional: per-user credentials so fallback acts as this user, not the hub bot.
+#         # When set, API calls are billed to this user's Anthropic account and
+#         # PR comments are posted by their own GitHub account.
+#         # Alternative: run a daemon session (set_filter repo=null, branch=null) for
+#         # true identity binding without sharing credentials with the hub admin.
+#         anthropic_api_key: ""          # User's own Anthropic API key (optional)
+#         github_token: ""               # User's own GitHub PAT (optional)
 #
 #     - github_username: alice
 #       token: "REPLACE_WITH_GENERATED_TOKEN"

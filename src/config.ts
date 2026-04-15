@@ -255,6 +255,18 @@ export interface HubUserFallback {
   enabled?: boolean;
   /** Milliseconds to wait for a claim before triggering fallback. Default: hub.fallback.timeout_ms */
   timeout_ms?: number;
+  /**
+   * Anthropic API key for this user's fallback invocations.
+   * When set, fallback API calls are billed to this user's account instead of the hub's.
+   * Falls back to the hub-wide ANTHROPIC_API_KEY env var if omitted.
+   */
+  anthropic_api_key?: string;
+  /**
+   * GitHub PAT for posting PR comments during fallback.
+   * When set, comments appear as this user's GitHub account instead of the hub bot's.
+   * Falls back to the hub-wide GITHUB_TOKEN env var if omitted.
+   */
+  github_token?: string;
 }
 
 /**

@@ -423,11 +423,14 @@ export class FallbackWorker {
     if (apiKey) {
       this.client = new Anthropic({ apiKey });
     } else {
-      const anyEnabled = cfg.fallback.enabled || cfg.users.some((u) => u.fallback?.enabled);
-      if (anyEnabled) {
+      // Warn only for users who have fallback enabled but no per-user or hub-wide API key
+      const anyEnabledWithoutKey = cfg.users.some(
+        (u) => (u.fallback?.enabled ?? cfg.fallback.enabled) && !u.fallback?.anthropic_api_key,
+      );
+      if (anyEnabledWithoutKey) {
         log(
-          "WARNING: ANTHROPIC_API_KEY is not set but fallback is enabled.",
-          "Set ANTHROPIC_API_KEY in .env — fallback worker will not fire until then.",
+          "WARNING: ANTHROPIC_API_KEY is not set but fallback is enabled for some users.",
+          "Set ANTHROPIC_API_KEY in .env or configure fallback.anthropic_api_key per user.",
         );
       }
     }
@@ -445,7 +448,9 @@ export class FallbackWorker {
     eventType: string,
   ): void {
     const effectiveEnabled = profile.fallback?.enabled ?? this.cfg.fallback.enabled;
-    if (!effectiveEnabled || !this.client) return;
+    if (!effectiveEnabled) return;
+    // Proceed only if there is a usable API key (per-user key takes precedence over hub-wide client)
+    if (!profile.fallback?.anthropic_api_key && !this.client) return;
 
     const timeoutMs = profile.fallback?.timeout_ms ?? this.cfg.fallback.timeout_ms;
 
@@ -477,13 +482,18 @@ export class FallbackWorker {
   }
 
   private async invoke(entry: FallbackPending): Promise<void> {
-    if (!this.client) return;
     const { notification, routing, profile, eventType } = entry;
+    // Per-user key takes precedence; fall back to hub-wide client
+    const client = profile.fallback?.anthropic_api_key
+      ? new Anthropic({ apiKey: profile.fallback.anthropic_api_key })
+      : this.client;
+    if (!client) return;
+
     const prompt = buildFallbackPrompt(notification, profile, eventType);
 
     let resultText = "";
     try {
-      const msg = await this.client.messages.create({
+      const msg = await client.messages.create({
         model: this.cfg.fallback.model,
         max_tokens: 8096,
         messages: [{ role: "user", content: prompt }],
@@ -499,7 +509,7 @@ export class FallbackWorker {
     // Post PR comment if configured
     const prNumber = notification.meta.pr_number;
     if (this.cfg.fallback.notify_via_pr_comment && prNumber && routing.repo) {
-      await this.postPRComment(routing.repo, prNumber, profile.github_username, resultText);
+      await this.postPRComment(routing.repo, prNumber, profile, resultText);
     }
 
     // Queue a summary notification for when the user reconnects
@@ -522,10 +532,11 @@ export class FallbackWorker {
   private async postPRComment(
     repo: string,
     prNumber: string,
-    username: string,
+    profile: HubUserProfile,
     body: string,
   ): Promise<void> {
-    const token = process.env.GITHUB_TOKEN;
+    // Per-user GitHub token posts as the user; falls back to hub-wide token
+    const token = profile.fallback?.github_token ?? process.env.GITHUB_TOKEN;
     if (!token) return;
     const [owner, repoName] = repo.split("/");
     if (!owner || !repoName) return;
@@ -533,7 +544,7 @@ export class FallbackWorker {
     const truncatedLines = body.split("\n").slice(0, 40);
     const isTruncated = body.split("\n").length > 40;
     const commentBody = [
-      `> 🤖 **claude-beacon fallback worker** — @${username} had no active sessions`,
+      `> 🤖 **claude-beacon fallback worker** — @${profile.github_username} had no active sessions`,
       ">",
       ...truncatedLines.map((l) => `> ${l}`),
       isTruncated ? "> _(truncated)_" : "",
