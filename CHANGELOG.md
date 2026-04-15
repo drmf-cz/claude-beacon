@@ -11,9 +11,10 @@
 - `src/__tests__/hub.test.ts`: add `loadDotEnv` test suite (7 cases: loads new vars, preserves existing vars, strips double/single quotes, skips comments/blanks, skips malformed lines, no-throw on missing file); add `bearerAuth` edge cases (empty token, header trimming behaviour, greedy `\\s+` behaviour, non-Bearer scheme)
 - `src/__tests__/server.test.ts`: add webhook guard sequencing integration suite (4 cases: bad sig → 401, dedup on replay, oversized → 413 before sig check, error response does not echo request body); add token log truncation invariant tests (3 cases documenting the 8-char prefix and char-count-only logging contract)
 
-### Code
+### Bug fixes
+- **Hub `.env` loading**: hub now loads `.env` from the same directory as the `--config` file at startup, in addition to the CWD that Bun auto-loads. Fixes `GITHUB_WEBHOOK_SECRET` not being found when running the compiled `claude-beacon-hub` binary from a different directory.
+- **Hub startup validation**: `GITHUB_WEBHOOK_SECRET` is now validated at process start with a fatal error and actionable message; previously the hub would start silently and reject every webhook at runtime.
 - Export `loadDotEnv` from `src/hub.ts` to enable direct unit testing
-- `src/hub.ts` (carried from PR #42): load `.env` from config file directory at startup; fatal startup validation for `GITHUB_WEBHOOK_SECRET`
 
 ## [1.8.0] — 2026-04-15
 
