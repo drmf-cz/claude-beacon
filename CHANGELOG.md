@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.4] — 2026-04-15
+
+### Bug fixes
+- **Hub `allowed_authors` mutation**: `config.webhooks.allowed_authors` was being assigned directly on the result of `deepMerge`, which shares nested object references with `DEFAULT_CONFIG`. Fixed by cloning both levels with spread (`{ ...config, webhooks: { ...config.webhooks, allowed_authors: [...] } }`) so `DEFAULT_CONFIG` is never mutated. Applied to both `--config` and `--author` paths.
+- **`config.example.yaml`**: update startup example from `claude-beacon-mux --config` to `claude-beacon-hub --config`.
+
 ## [1.8.3] — 2026-04-15
 
 ### Features
