@@ -33,8 +33,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import type { Config, HubConfig, HubUserProfile } from "./config.js";
-import { DEFAULT_CONFIG, loadHubConfig } from "./config.js";
+import { parse } from "yaml";
+import type { Config, HubConfig, HubUserBehavior, HubUserProfile } from "./config.js";
+import { DEFAULT_CONFIG, loadHubConfig, resolveUserConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
 import type { CINotification } from "./types.js";
@@ -154,6 +155,8 @@ interface HubSessionEntry {
   label: string | null;
   worktree_path: string | null;
   lastActivityAt: number;
+  /** Per-session behavior override set via the set_behavior MCP tool. Highest priority. */
+  behavior?: Partial<HubUserBehavior>;
 }
 
 const sessions = new Map<string, HubSessionEntry>();
@@ -704,6 +707,53 @@ function createHubSession(profile: HubUserProfile): {
   );
 
   server.tool(
+    "set_behavior",
+    [
+      "Upload local behavior configuration for this session.",
+      "Call once on startup after set_filter, passing the contents of",
+      "~/.claude/beacon-behavior.yaml (or any local YAML file).",
+      "Overrides hub-config.yaml user.behavior for this session only.",
+      "Priority: this call (highest) > hub-config.yaml user.behavior > global defaults.",
+    ].join(" "),
+    {
+      behavior_yaml: z
+        .string()
+        .describe(
+          "YAML string — same schema as hub-config.yaml user.behavior. " +
+            "Keys: code_style, on_pr_review, on_ci_failure_main, on_ci_failure_branch, " +
+            "on_merge_conflict, on_branch_behind, on_pr_opened, on_pr_approved.",
+        ),
+    },
+    async ({ behavior_yaml }) => {
+      let parsed: unknown;
+      try {
+        parsed = parse(behavior_yaml);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Invalid YAML: ${err}` }] };
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return {
+          content: [{ type: "text" as const, text: "behavior_yaml must be a YAML mapping object" }],
+        };
+      }
+      if (entry) {
+        entry.behavior = parsed as Partial<HubUserBehavior>;
+      }
+      log(
+        `Behavior set for @${profile.github_username} (session ${sessionId.slice(0, 8)})`,
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Behavior config applied for this session. Instructions will use your local overrides.",
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
     "claim_notification",
     [
       "Claim exclusive ownership of work for a repo+branch before acting on a notification.",
@@ -1059,8 +1109,31 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
 
   startMcpServer();
 
+  // Build a per-user config resolver: maps pr_author → their merged Config.
+  // Priority: session behavior (set_behavior tool) > user behavior (hub-config.yaml) > global.
+  const configResolver = (routing: RoutingKey): Config => {
+    const prAuthor = routing.pr_author;
+    if (!prAuthor) return config;
+    const profile = [...tokenMap.values()].find((u) => u.github_username === prAuthor);
+    if (!profile) return config;
+
+    // Pick session behavior from the most recently active session for this user.
+    const userSessionIds = userSessions.get(prAuthor) ?? new Set<string>();
+    let sessionBehavior: Partial<HubUserBehavior> | undefined;
+    let latestActivity = 0;
+    for (const sid of userSessionIds) {
+      const s = sessions.get(sid);
+      if (s?.behavior && s.lastActivityAt > latestActivity) {
+        sessionBehavior = s.behavior;
+        latestActivity = s.lastActivityAt;
+      }
+    }
+
+    return resolveUserConfig(config, profile, sessionBehavior);
+  };
+
   try {
-    const webhookServer = startWebhookServer(routeToSessions, config);
+    const webhookServer = startWebhookServer(routeToSessions, config, configResolver);
     log(`Webhook server listening on http://localhost:${webhookServer.port}`);
   } catch (err: unknown) {
     const isAddrInUse =

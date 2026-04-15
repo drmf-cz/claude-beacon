@@ -6,20 +6,6 @@ This is the recommended approach when you work across several repos or want new 
 
 ---
 
-## How it differs from per-repo webhooks
-
-| Aspect | Per-repo webhook | GitHub App |
-|---|---|---|
-| Webhook URL | Set per repository | Set once in App settings |
-| Webhook secret | Set per repository | Set once in App settings |
-| Adding a new repo | Manually add webhook | Install app once → all repos covered |
-| Code changes needed | — | None — same HMAC format |
-| `GITHUB_TOKEN` | PAT | PAT still works |
-
-The webhook payload format is identical, so `verifySignature`, event parsing, and all notification logic work without modification.
-
----
-
 ## 1. Create the GitHub App
 
 Go to **github.com/settings/apps → New GitHub App** (or **your-org → Settings → Developer settings → GitHub Apps → New GitHub App** for an org-owned app).
@@ -40,34 +26,13 @@ Fill in:
 
 ## 2. Set repository permissions
 
-Under **Repository permissions**, set each to **Read-only**:
-
-| Permission | Why |
-|---|---|
-| **Actions** | `workflow_run`, `workflow_job`, `check_suite` events + log fetching |
-| **Pull requests** | `pull_request`, `pull_request_review`, review comment events |
-| **Issues** | `issue_comment` on PRs |
-| **Contents** | `push` events (for behind-PR detection) |
-| **Code scanning alerts** | `code_scanning_alert` events (opt-in) |
-| **Dependabot alerts** | `dependabot_alert` events (opt-in) |
-
-> Only grant what you need. Code scanning and Dependabot can be skipped if you don't use those hooks.
+Under **Repository permissions**, set **Actions**, **Pull requests**, **Issues**, and **Contents** to **Read-only**. Optionally add **Code scanning alerts** and **Dependabot alerts** (only needed if you enable those hooks in your config).
 
 ---
 
 ## 3. Subscribe to webhook events
 
-Under **Subscribe to events**, tick all that apply:
-
-- [x] Workflow runs
-- [x] Pull requests
-- [x] Pull request reviews
-- [x] Pull request review comments
-- [x] Pull request review threads
-- [x] Issue comments
-- [x] Pushes
-- [ ] Code scanning alerts *(opt-in — only if `on_code_scanning_alert.enabled: true`)*
-- [ ] Dependabot alerts *(opt-in — only if `on_dependabot_alert.enabled: true`)*
+Tick: **Workflow runs · Pull requests · Pull request reviews · Pull request review comments · Pull request review threads · Issue comments · Pushes**. Optionally add **Code scanning alerts** and **Dependabot alerts** if using those hooks.
 
 ---
 
@@ -90,44 +55,13 @@ To add more repos later: go to the App's installation page and edit the reposito
 
 ---
 
-## 5a. Organization installation — who can do what
+## 5a. Organization installation
 
-GitHub App installation at the org level requires **org owner** privileges. Here is what each role can do:
-
-| Role | Can create the App | Can install at org level | Can install for their own repos |
-|---|---|---|---|
-| Org owner | Yes | Yes | Yes |
-| Org member (non-owner) | Yes (personal account only) | No — must request from owner | Yes (their own personal repos) |
-| External collaborator | Personal account only | No | Only repos they have admin access to |
-
-**If you are not an org owner, you have two options:**
-
-**Option A — Ask your org owner to install (covers all org repos):**
-1. Share the App ID with your org owner (visible on the App's settings page under "About").
-2. Org owner goes to `github.com/organizations/<your-org>/settings/installations`.
-3. Owner finds the App → clicks **Install** → selects **All repositories** (or specific repos) → **Install**.
-
-**Option B — Install under your personal account (covers only your personal repos):**
-1. Go to `github.com/settings/installations` (your personal settings, not org settings).
-2. Find the App → **Install** → select **Only select repositories** → pick your repos → **Install**.
-
-> **Important:** A personal account installation cannot receive events from org-owned repositories. Events from org repos only flow when the App is installed at the org level by an org owner.
-
----
+Org-level installation requires **org owner** privileges. If you are not an org owner, ask your admin to install: they go to `github.com/organizations/<org>/settings/installations` → find the App → **Install** → All repositories. Alternatively, install under your personal account at `github.com/settings/installations` — this covers only your own repos, not org-owned ones.
 
 ## 5b. Accepting updated permissions
 
-When you update a GitHub App's permissions after initial installation (e.g. adding Code scanning alerts later), **each existing installation must separately accept the updated permissions** before the new event types start flowing.
-
-**What happens:**
-1. You update the App's permissions in the App settings.
-2. GitHub emails the org owner (and the personal account owner for personal installs) with subject: *"Review permissions for [App name]"*.
-3. The owner clicks the link in the email, or goes to:
-   - Org installs: `github.com/organizations/<org>/settings/installations` → click the App → **Review and accept**
-   - Personal installs: `github.com/settings/installations` → click the App → **Review and accept**
-4. Until the owner accepts, the App continues using its **old** permissions — new event types are not delivered.
-
-> **For developers (non-owners):** If you added a new event type and events stop arriving after the App permission update, ask your org owner to check their email for a pending permissions review from GitHub.
+When you add new permissions to the App later (e.g. Code scanning alerts), GitHub emails the org owner to accept the change before new events flow. If events stop after a permission update, ask your org owner to check their email for a pending "Review permissions" notification from GitHub.
 
 ---
 

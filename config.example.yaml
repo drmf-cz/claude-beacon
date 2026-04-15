@@ -69,6 +69,15 @@ webhooks:
   #   - myorg/frontend
   #   - myorg/backend
 
+  # Loop-prevention guard. When true (default), review events from anyone in
+  # allowed_authors are silently dropped — prevents Claude's own reply comments
+  # from re-triggering the review cycle.
+  #
+  # Set to false if you want Claude to react to your own PR comments (e.g. you
+  # leave a comment on your own PR telling Claude what to fix). You are then
+  # responsible for not creating a feedback loop.
+  # skip_own_comments: false
+
 # ── Agent behaviour ───────────────────────────────────────────────────────────
 # Each section controls the instruction text appended to the channel notification
 # Claude receives. Edit these to match your project's workflow and conventions.
@@ -315,6 +324,29 @@ code_style: ""
 #         # true identity binding without sharing credentials with the hub admin.
 #         anthropic_api_key: ""          # User's own Anthropic API key (optional)
 #         github_token: ""               # User's own GitHub PAT (optional)
+#
+#       # Per-user instruction overrides — replaces the global behavior config for
+#       # this user's events. Any key omitted falls back to the global config.
+#       behavior:
+#         code_style: |
+#           TypeScript strict mode. No any. Prefer const. Functional style.
+#           File headers: Apache 2.0 license block.
+#         on_pr_review:
+#           skill: "pr-comment-response"
+#           instruction: |
+#             Use the {skill} skill to address all review comments for PR #{pr_number}.
+#             {worktree_preamble}
+#         on_ci_failure_branch:
+#           upstream_sync: true
+#           instruction: |
+#             {health_check_step}
+#             {use_agent_preamble}
+#             Fix the CI failure on {repo} ({branch}). Run: fetch_workflow_logs("{run_url}")
+#         on_pr_opened:
+#           enabled: true
+#           instruction: |
+#             New PR #{pr_number} opened by @{author}: {pr_url}
+#             Do a first-pass review and leave inline comments for obvious issues.
 #
 #     - github_username: alice
 #       token: "REPLACE_WITH_GENERATED_TOKEN"

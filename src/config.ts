@@ -49,6 +49,17 @@ export interface WebhooksConfig {
    * Example: ["myorg/frontend", "myorg/backend"]
    */
   allowed_repos: string[];
+  /**
+   * When true (default), review events sent by someone in allowed_authors are silently
+   * dropped. This prevents an infinite loop: Claude replies to a review → that reply fires
+   * a new webhook → Claude replies again → ...
+   *
+   * Set to false if you want Claude to react to your own PR comments — for example, when
+   * you leave a comment on your own PR to instruct Claude what to fix next. You are then
+   * responsible for not triggering a loop (e.g. by having Claude reply in a way that does
+   * not itself post a new review comment).
+   */
+  skip_own_comments: boolean;
 }
 
 export interface CIFailureBehavior {
@@ -270,6 +281,28 @@ export interface HubUserFallback {
 }
 
 /**
+ * Per-user behavior overrides for hub mode.
+ * Any key set here replaces (deep-merges over) the corresponding top-level behavior config.
+ * Omitted keys fall back to the global behavior config from the YAML / defaults.
+ */
+export interface HubUserBehavior {
+  /**
+   * Per-user code style guidelines prepended to PR review notifications.
+   * Replaces the global `code_style` for this user. Leave unset to inherit global.
+   */
+  code_style?: string;
+  on_pr_review?: Partial<PRReviewBehavior>;
+  on_ci_failure_main?: Partial<CIFailureBehavior>;
+  on_ci_failure_branch?: Partial<CIFailureBehavior>;
+  on_merge_conflict?: Partial<PRStateBehavior>;
+  on_branch_behind?: Partial<PRStateBehavior>;
+  on_pr_opened?: Partial<PROpenedBehavior>;
+  on_pr_approved?: Partial<PRApprovedBehavior>;
+  on_dependabot_alert?: Partial<SecurityAlertBehavior<DependabotMinSeverity>>;
+  on_code_scanning_alert?: Partial<SecurityAlertBehavior<CodeScanningMinSeverity>>;
+}
+
+/**
  * A developer registered on the hub.
  * Admin configures these in the YAML; users connect with their token via Bearer auth.
  */
@@ -285,6 +318,46 @@ export interface HubUserProfile {
   skills?: HubSkillMap;
   /** Fallback worker settings for this user. */
   fallback?: HubUserFallback;
+  /**
+   * Per-user instruction and behavior overrides.
+   * Any field set here replaces the corresponding global config value for this user's events.
+   * Useful when different developers work on repos with different code styles or workflows.
+   */
+  behavior?: HubUserBehavior;
+}
+
+/**
+ * Merge a user's per-user behavior overrides with the global Config.
+ * Returns the global Config unchanged when the profile has no overrides.
+ */
+export function resolveUserConfig(
+  globalConfig: Config,
+  profile: HubUserProfile,
+  sessionBehavior?: Partial<HubUserBehavior>,
+): Config {
+  let result = globalConfig;
+
+  // Apply user-level behavior (from hub-config.yaml user.behavior — admin-controlled)
+  if (profile.behavior) {
+    const { code_style, ...behaviorOverrides } = profile.behavior;
+    result = {
+      ...result,
+      code_style: code_style !== undefined ? code_style : result.code_style,
+      behavior: deepMerge(result.behavior, behaviorOverrides as Partial<BehaviorConfig>),
+    };
+  }
+
+  // Apply session-level behavior (from set_behavior tool — developer-controlled, highest priority)
+  if (sessionBehavior) {
+    const { code_style, ...behaviorOverrides } = sessionBehavior;
+    result = {
+      ...result,
+      code_style: code_style !== undefined ? code_style : result.code_style,
+      behavior: deepMerge(result.behavior, behaviorOverrides as Partial<BehaviorConfig>),
+    };
+  }
+
+  return result;
 }
 
 /** Hub-wide fallback worker configuration. */
@@ -343,6 +416,7 @@ export const DEFAULT_CONFIG: Config = {
     allowed_authors: [],
     allowed_events: [],
     allowed_repos: [],
+    skip_own_comments: true,
   },
   behavior: {
     worktrees: {
@@ -523,7 +597,7 @@ export function interpolate(template: string, vars: Record<string, string>): str
 
 // ── Deep Merge ────────────────────────────────────────────────────────────────
 
-function deepMerge<T extends object>(base: T, override: Partial<T>): T {
+export function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };
   for (const key of Object.keys(override) as (keyof T)[]) {
     const val = override[key];
@@ -618,11 +692,13 @@ export function loadHubConfig(filePath: string): { config: Config; hub: HubConfi
     }
     const skills = user.skills as HubSkillMap | undefined;
     const fallback = user.fallback as HubUserFallback | undefined;
+    const behavior = user.behavior as HubUserBehavior | undefined;
     return {
       github_username: user.github_username as string,
       token: user.token as string,
       ...(skills !== undefined && { skills }),
       ...(fallback !== undefined && { fallback }),
+      ...(behavior !== undefined && { behavior }),
     };
   });
 
