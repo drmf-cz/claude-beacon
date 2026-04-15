@@ -1,0 +1,1019 @@
+/**
+ * Hub server — company-wide multi-user entry point.
+ *
+ * claude-beacon-hub extends the mux with multi-tenant features:
+ *   - Bearer token authentication per user (pre-shared, admin-configured in YAML)
+ *   - Events routed by PR author → the author's registered Claude Code sessions (Tier 0)
+ *   - Per-user skill config embedded into notification instructions
+ *   - Anthropic SDK fallback worker: when a user's sessions are offline or unclaimed for
+ *     too long, Claude handles the work server-side and posts a PR comment summary
+ *
+ * Exposes two HTTP endpoints:
+ *   :9443  — GitHub webhook receiver (internet-facing via GitHub App webhook URL)
+ *   :9444  — MCP over Streamable HTTP (expose via HTTPS reverse proxy; Bearer auth required)
+ *
+ * Each developer registers their Claude Code with:
+ *   claude mcp add --transport http claude-beacon https://beacon.company.com/mcp
+ * Their personal Bearer token must be in the Authorization header (set in MCP client config).
+ *
+ * Environment variables (can be placed in a .env file — Bun loads it automatically):
+ *   GITHUB_WEBHOOK_SECRET  required  HMAC secret for webhook verification
+ *   GITHUB_TOKEN           required  PAT for log fetching and PR status checks
+ *   ANTHROPIC_API_KEY      optional  Required when any user has fallback.enabled: true
+ *   WEBHOOK_PORT           optional  Webhook receiver port (default: 9443)
+ *   MCP_PORT               optional  MCP HTTP port (default: 9444)
+ */
+
+import { randomUUID } from "node:crypto";
+import { rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { z } from "zod";
+import type { Config, HubConfig, HubUserProfile } from "./config.js";
+import { DEFAULT_CONFIG, loadHubConfig } from "./config.js";
+import type { NotifyFn, RoutingKey } from "./server.js";
+import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
+import type { CINotification } from "./types.js";
+
+const log = (...args: unknown[]) => console.error("[github-ci:hub]", ...args);
+
+// ── Module-level mutable state ────────────────────────────────────────────────
+// Declared here so session-factory closures can reference them at call time.
+// All are populated by the CLI setup block at the bottom before any session connects.
+
+let config: Config = DEFAULT_CONFIG;
+let hubConfig: HubConfig = {
+  users: [],
+  fallback: {
+    enabled: false,
+    timeout_ms: 900_000,
+    model: "claude-sonnet-4-6",
+    notify_via_pr_comment: true,
+  },
+};
+let tokenMap: Map<string, HubUserProfile> = new Map();
+let fallbackWorker: FallbackWorker;
+
+// ── Claim file helpers ────────────────────────────────────────────────────────
+
+const CLAIM_FILE = join(homedir(), ".claude", "beacon-active-claim");
+
+function writeClaimFile(claimKey: string): void {
+  try {
+    writeFileSync(CLAIM_FILE, claimKey, "utf8");
+  } catch {
+    // Non-fatal
+  }
+}
+
+function deleteClaimFile(): void {
+  try {
+    rmSync(CLAIM_FILE, { force: true });
+  } catch {
+    // Non-fatal
+  }
+}
+
+// ── Notification event store ──────────────────────────────────────────────────
+
+class NotificationEventStore implements EventStore {
+  private events = new Map<string, { streamId: string; message: unknown }>();
+
+  async storeEvent(streamId: string, message: unknown): Promise<string> {
+    const id = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    this.events.set(id, { streamId, message });
+    return id;
+  }
+
+  async replayEventsAfter(
+    lastEventId: string,
+    { send }: { send: (id: string, msg: unknown) => Promise<void> },
+  ): Promise<string> {
+    if (!lastEventId || !this.events.has(lastEventId)) return "";
+    const streamId = lastEventId.split("_")[0] ?? "";
+    let found = false;
+    for (const [id, { streamId: sid, message }] of [...this.events.entries()].sort((a, b) =>
+      a[0].localeCompare(b[0]),
+    )) {
+      if (sid !== streamId) continue;
+      if (id === lastEventId) {
+        found = true;
+        continue;
+      }
+      if (found) await send(id, message);
+    }
+    return streamId;
+  }
+}
+
+// ── Session registry ──────────────────────────────────────────────────────────
+
+interface HubSessionEntry {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+  /** GitHub login of the authenticated user — derived from Bearer token, immutable. */
+  github_username: string;
+  repo: string | null;
+  branch: string | null;
+  label: string | null;
+  worktree_path: string | null;
+  lastActivityAt: number;
+}
+
+const sessions = new Map<string, HubSessionEntry>();
+/** Secondary index: github_username → Set<sessionId> for O(1) author-based routing. */
+const userSessions = new Map<string, Set<string>>();
+
+function addUserSession(username: string, sessionId: string): void {
+  let ids = userSessions.get(username);
+  if (!ids) {
+    ids = new Set();
+    userSessions.set(username, ids);
+  }
+  ids.add(sessionId);
+}
+
+function removeUserSession(username: string, sessionId: string): void {
+  const ids = userSessions.get(username);
+  if (!ids) return;
+  ids.delete(sessionId);
+  if (ids.size === 0) userSessions.delete(username);
+}
+
+// ── Work-context claims ───────────────────────────────────────────────────────
+
+interface WorkClaim {
+  sessionId: string;
+  label: string | null;
+  expiresAt: number;
+}
+
+const workClaims = new Map<string, WorkClaim>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, c] of workClaims) {
+    if (now > c.expiresAt) {
+      workClaims.delete(k);
+      deleteClaimFile();
+      log(`Claim expired: ${k}`);
+      const ownerSession = sessions.get(c.sessionId);
+      if (ownerSession) {
+        sendStatusLine(ownerSession.server, buildStatusText(ownerSession)).catch(() => {});
+      }
+    }
+  }
+}, 60_000).unref();
+
+function claimKeyFor(routing: RoutingKey): string {
+  return routing.branch ? `${routing.repo}:${routing.branch}` : `${routing.repo}:*`;
+}
+
+// ── Pre-registration notification queue ──────────────────────────────────────
+
+interface PendingNotification {
+  notification: CINotification;
+  routing: RoutingKey;
+  receivedAt: number;
+}
+
+const pendingByRepo = new Map<string, PendingNotification[]>();
+const PENDING_TTL_MS = 2 * 60 * 60 * 1000;
+const MAX_PENDING_REPOS = 100;
+const MAX_PENDING_PER_REPO = 50;
+
+function enqueuePending(routing: RoutingKey, notification: CINotification): void {
+  const key = routing.repo ?? "*";
+  const now = Date.now();
+  if (!pendingByRepo.has(key) && pendingByRepo.size >= MAX_PENDING_REPOS) {
+    const oldest = pendingByRepo.keys().next().value;
+    if (oldest !== undefined) pendingByRepo.delete(oldest);
+  }
+  const existing = (pendingByRepo.get(key) ?? []).filter(
+    (n) => now - n.receivedAt < PENDING_TTL_MS,
+  );
+  if (existing.length >= MAX_PENDING_PER_REPO) existing.shift();
+  existing.push({ notification, routing, receivedAt: now });
+  pendingByRepo.set(key, existing);
+  log(
+    `Queued for replay (no session): ${routing.repo}@${routing.branch ?? "*"} — queue depth: ${existing.length}`,
+  );
+}
+
+async function flushPendingToSession(repo: string | null, session: HubSessionEntry): Promise<void> {
+  const keys = repo !== null ? [repo] : [...pendingByRepo.keys()];
+  const now = Date.now();
+  for (const key of keys) {
+    const pending = pendingByRepo.get(key);
+    if (!pending || pending.length === 0) continue;
+    const fresh = pending.filter((n) => now - n.receivedAt < PENDING_TTL_MS);
+    if (fresh.length === 0) {
+      pendingByRepo.delete(key);
+      continue;
+    }
+    log(`Flushing ${fresh.length} queued notification(s) for ${key} to ${session.github_username}`);
+    let anyDelivered = false;
+    for (const { notification, routing } of fresh) {
+      const claimKey = claimKeyFor(routing);
+      const enriched = enrichNotification(notification, claimKey, "normal");
+      try {
+        await sendChannelNotification(session.server, enriched);
+        anyDelivered = true;
+      } catch (err) {
+        log(`Failed to flush pending notification for ${key}:`, err);
+      }
+    }
+    if (anyDelivered) pendingByRepo.delete(key);
+  }
+}
+
+// ── Session TTL ───────────────────────────────────────────────────────────────
+
+const SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
+
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+      if (now - session.lastActivityAt > SESSION_IDLE_TTL_MS) {
+        removeUserSession(session.github_username, id);
+        sessions.delete(id);
+        log(
+          `Session ${id.slice(0, 8)} (${session.github_username}) idle >30 min — removed (total: ${sessions.size})`,
+        );
+        for (const [k, c] of workClaims) {
+          if (c.sessionId === id) {
+            workClaims.delete(k);
+            log(`Stale claim cleared: ${k} (session was idle)`);
+          }
+        }
+      }
+    }
+  },
+  5 * 60 * 1000,
+).unref();
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Validate a Bearer token from the Authorization header against registered users.
+ * Returns the matching UserProfile, or null if the token is missing or invalid.
+ */
+export function bearerAuth(req: Request, map: Map<string, HubUserProfile>): HubUserProfile | null {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+  if (!match?.[1]) return null;
+  return map.get(match[1]) ?? null;
+}
+
+// ── Routing ───────────────────────────────────────────────────────────────────
+
+/**
+ * Four-tier session selection:
+ *
+ * Tier 0 (author match — hub-only): if the event has a known pr_author who is a
+ *   registered hub user, limit candidates to that user's sessions; then apply
+ *   Tier 1+2 repo+branch matching within that pool.
+ *
+ * Tier 1+2: sessions matching by repo AND (exact branch OR wildcard branch).
+ *   Applied to ALL sessions when Tier 0 finds no candidates.
+ *
+ * Tier 3: catch-all — any session for the same repo, when Tier 1+2 is empty.
+ *
+ * Returns empty array when no sessions are registered at all (triggers fallback).
+ */
+export function selectHubRecipients(
+  routing: RoutingKey,
+  allSessions: Map<string, HubSessionEntry>,
+  allUserSessions: Map<string, Set<string>>,
+): { recipients: HubSessionEntry[]; mode: "normal" | "catchall" } {
+  const forRepo = (s: HubSessionEntry) => s.repo === null || s.repo === routing.repo;
+
+  // Tier 0: restrict candidate pool to the event author's sessions
+  const authorUsername = routing.pr_author ?? null;
+  const authorIds = authorUsername ? (allUserSessions.get(authorUsername) ?? null) : null;
+  const candidatePool: HubSessionEntry[] =
+    authorIds !== null
+      ? [...authorIds]
+          .map((id) => allSessions.get(id))
+          .filter((s): s is HubSessionEntry => s !== undefined)
+      : [...allSessions.values()];
+
+  // Tier 1+2: repo + branch match within candidate pool
+  const primary = candidatePool.filter(
+    (s) =>
+      forRepo(s) && (s.branch === null || routing.branch === null || s.branch === routing.branch),
+  );
+
+  if (primary.length > 0) {
+    const sorted = [
+      ...primary.filter((s) => routing.branch !== null && s.branch === routing.branch),
+      ...primary.filter((s) => !(routing.branch !== null && s.branch === routing.branch)),
+    ];
+    return { recipients: sorted, mode: "normal" };
+  }
+
+  // Tier 3: catch-all within candidate pool
+  const catchall = candidatePool.filter(forRepo);
+  if (catchall.length > 0) return { recipients: catchall, mode: "catchall" };
+
+  // If Tier 0 had candidates but no repo match — fall through to all sessions
+  if (authorIds !== null && candidatePool.length > 0) {
+    return { recipients: [...allSessions.values()].filter(forRepo), mode: "catchall" };
+  }
+
+  return { recipients: [], mode: "catchall" };
+}
+
+function enrichNotification(
+  n: CINotification,
+  claimKey: string,
+  mode: "owned" | "normal" | "catchall",
+): CINotification {
+  const meta = { ...n.meta, claim_key: claimKey };
+  if (mode === "owned") return { meta, summary: n.summary };
+
+  const branch = n.meta.branch ?? n.meta.head_branch ?? null;
+  const branchSlug = branch?.replace(/[^a-z0-9]/gi, "-") ?? "fix";
+
+  const catchallHeader =
+    mode === "catchall"
+      ? [
+          "⚠️  CATCH-ALL DELIVERY: no session is currently in the worktree for this branch.",
+          "One of you must volunteer by claiming it and creating a worktree.",
+          "",
+        ]
+      : [];
+
+  const worktreeBlock = branch
+    ? [
+        `IF claim returns "ok":`,
+        `  a) Your current branch IS "${branch}":`,
+        `     → Fix here in your current directory`,
+        `  b) Your current branch IS NOT "${branch}":`,
+        `     → git worktree add /tmp/${branchSlug}-fix ${branchSlug}`,
+        `     → Fix in that worktree, commit, push`,
+        `     → Call release_claim("${claimKey}") when done`,
+        `     → git worktree remove /tmp/${branchSlug}-fix`,
+      ]
+    : [
+        `IF claim returns "ok": fix in your current directory.`,
+        `Call release_claim("${claimKey}") when done.`,
+      ];
+
+  const claimBlock = [
+    "",
+    "─────────────────────────────────────────",
+    ...catchallHeader,
+    `BEFORE ACTING: call claim_notification("${claimKey}")`,
+    '  "ok"           → you have the lock, continue',
+    '  "already_owned"→ you already hold it (TTL extended); continue if still working',
+    '  "conflict:X"   → session X claimed it, STOP immediately',
+    '  "expired"      → STOP',
+    "",
+    ...worktreeBlock,
+    "─────────────────────────────────────────",
+  ].join("\n");
+
+  return { meta, summary: n.summary + claimBlock };
+}
+
+// ── Fallback worker ───────────────────────────────────────────────────────────
+
+function buildFallbackPrompt(
+  notification: CINotification,
+  profile: HubUserProfile,
+  eventType: string,
+): string {
+  const skillOverride =
+    profile.skills?.[eventType as keyof NonNullable<HubUserProfile["skills"]>] ?? "";
+  const lines = [
+    `You are acting as a fallback worker for GitHub user @${profile.github_username}, who has no active Claude Code sessions right now.`,
+    "Execute the following GitHub CI/PR notification directive on their behalf:",
+    "",
+    notification.summary,
+  ];
+  if (skillOverride) {
+    lines.push("", `Use the "${skillOverride}" skill during the execution phase.`);
+  }
+  return lines.join("\n");
+}
+
+interface FallbackPending {
+  notification: CINotification;
+  routing: RoutingKey;
+  profile: HubUserProfile;
+  eventType: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export class FallbackWorker {
+  private pending = new Map<string, FallbackPending>();
+  private client: Anthropic | null = null;
+  private cfg: HubConfig;
+
+  constructor(cfg: HubConfig) {
+    this.cfg = cfg;
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (apiKey) {
+      this.client = new Anthropic({ apiKey });
+    } else {
+      const anyEnabled = cfg.fallback.enabled || cfg.users.some((u) => u.fallback?.enabled);
+      if (anyEnabled) {
+        log(
+          "WARNING: ANTHROPIC_API_KEY is not set but fallback is enabled.",
+          "Set ANTHROPIC_API_KEY in .env — fallback worker will not fire until then.",
+        );
+      }
+    }
+  }
+
+  /**
+   * Start watching a notification. If no session claims the work within the
+   * configured timeout, the Anthropic SDK fallback fires.
+   */
+  watch(
+    claimKey: string,
+    notification: CINotification,
+    routing: RoutingKey,
+    profile: HubUserProfile,
+    eventType: string,
+  ): void {
+    const effectiveEnabled = profile.fallback?.enabled ?? this.cfg.fallback.enabled;
+    if (!effectiveEnabled || !this.client) return;
+
+    const timeoutMs = profile.fallback?.timeout_ms ?? this.cfg.fallback.timeout_ms;
+
+    const timer = setTimeout(() => {
+      const entry = this.pending.get(claimKey);
+      if (!entry) return;
+      this.pending.delete(claimKey);
+      log(
+        `Fallback worker firing for ${claimKey} (${profile.github_username} unresponsive after ${timeoutMs / 1000}s)`,
+      );
+      this.invoke(entry).catch((err) => log("Fallback worker error:", err));
+    }, timeoutMs);
+
+    // Don't prevent process exit
+    if (typeof timer === "object" && timer !== null && "unref" in timer) {
+      (timer as { unref(): void }).unref();
+    }
+
+    this.pending.set(claimKey, { notification, routing, profile, eventType, timer });
+  }
+
+  /** Cancel the fallback timer when a session claims the work. */
+  cancel(claimKey: string): void {
+    const entry = this.pending.get(claimKey);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.pending.delete(claimKey);
+    log(`Fallback cancelled for ${claimKey} — session claimed the work`);
+  }
+
+  private async invoke(entry: FallbackPending): Promise<void> {
+    if (!this.client) return;
+    const { notification, routing, profile, eventType } = entry;
+    const prompt = buildFallbackPrompt(notification, profile, eventType);
+
+    let resultText = "";
+    try {
+      const msg = await this.client.messages.create({
+        model: this.cfg.fallback.model,
+        max_tokens: 8096,
+        messages: [{ role: "user", content: prompt }],
+      });
+      const first = msg.content[0];
+      resultText = first?.type === "text" ? first.text : "(no text response)";
+      log(`Fallback worker completed for ${routing.repo}@${routing.branch ?? "*"}`);
+    } catch (err) {
+      log("Fallback worker Anthropic API error:", err);
+      resultText = `Fallback worker encountered an error: ${String(err)}`;
+    }
+
+    // Post PR comment if configured
+    const prNumber = notification.meta.pr_number;
+    if (this.cfg.fallback.notify_via_pr_comment && prNumber && routing.repo) {
+      await this.postPRComment(routing.repo, prNumber, profile.github_username, resultText);
+    }
+
+    // Queue a summary notification for when the user reconnects
+    const summaryNotification: CINotification = {
+      summary: [
+        `🤖 Fallback worker handled a notification while @${profile.github_username} was offline.`,
+        `Repo: ${routing.repo} | Branch: ${routing.branch ?? "*"}`,
+        "",
+        "Summary of what was done:",
+        resultText.slice(0, 2000),
+        resultText.length > 2000 ? "\n[truncated — full response was posted as a PR comment]" : "",
+      ]
+        .join("\n")
+        .trimEnd(),
+      meta: { ...notification.meta, fallback: "true" },
+    };
+    enqueuePending(routing, summaryNotification);
+  }
+
+  private async postPRComment(
+    repo: string,
+    prNumber: string,
+    username: string,
+    body: string,
+  ): Promise<void> {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) return;
+    const [owner, repoName] = repo.split("/");
+    if (!owner || !repoName) return;
+
+    const truncatedLines = body.split("\n").slice(0, 40);
+    const isTruncated = body.split("\n").length > 40;
+    const commentBody = [
+      `> 🤖 **claude-beacon fallback worker** — @${username} had no active sessions`,
+      ">",
+      ...truncatedLines.map((l) => `> ${l}`),
+      isTruncated ? "> _(truncated)_" : "",
+    ]
+      .join("\n")
+      .trimEnd();
+
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${owner}/${repoName}/issues/${prNumber}/comments`,
+        {
+          method: "POST",
+          redirect: "manual",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          body: JSON.stringify({ body: commentBody }),
+        },
+      );
+      if (!res.ok) log(`Failed to post fallback PR comment: ${res.status}`);
+    } catch (err) {
+      log("Failed to post fallback PR comment:", err);
+    }
+  }
+}
+
+// ── Status line helpers ───────────────────────────────────────────────────────
+
+async function sendStatusLine(server: McpServer, text: string): Promise<void> {
+  try {
+    await server.server.notification({
+      method: "notifications/claude/statusLine",
+      params: { text },
+    });
+  } catch {
+    // Best-effort
+  }
+}
+
+function buildStatusText(
+  entry: HubSessionEntry,
+  claimKey?: string,
+  claimExpiresAt?: number,
+): string {
+  const reg = entry.branch
+    ? `claude-beacon ✓ ${entry.github_username} · ${entry.branch}`
+    : `claude-beacon ✓ ${entry.github_username}`;
+  if (!claimKey || !claimExpiresAt) return reg;
+  const minsLeft = Math.max(1, Math.ceil((claimExpiresAt - Date.now()) / 60_000));
+  return `${reg} | claim: ${claimKey} (${minsLeft}m left)`;
+}
+
+// ── Session factory ───────────────────────────────────────────────────────────
+
+function createHubSession(profile: HubUserProfile): {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+} {
+  const server = createMcpServer();
+  let entry: HubSessionEntry | undefined;
+  let sessionId = "";
+
+  server.tool(
+    "set_filter",
+    [
+      "Register this Claude Code session's repo and branch so it receives only",
+      "matching GitHub CI/PR notifications. Your GitHub identity is already set",
+      "from your Bearer token — call once on session startup and again after",
+      "switching branches or entering/leaving a worktree.",
+    ].join(" "),
+    {
+      repo: z
+        .string()
+        .nullable()
+        .describe(
+          'Full repository name ("owner/repo") parsed from git remote URL, or null for all repos',
+        ),
+      branch: z
+        .string()
+        .nullable()
+        .describe("Current branch from git, or null for all branches in the repo"),
+      label: z
+        .string()
+        .nullable()
+        .optional()
+        .describe("Human-readable session name, e.g. 'fix/my-branch'. Shown in conflict messages."),
+      worktree_path: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Absolute path of this session's working directory (git rev-parse --show-toplevel).",
+        ),
+    },
+    async ({ repo, branch, label, worktree_path }) => {
+      if (entry) {
+        entry.repo = repo;
+        entry.branch = branch;
+        entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
+        entry.worktree_path = worktree_path ?? null;
+      }
+      log(
+        `Filter set → ${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"}`,
+      );
+      if (entry) {
+        const repoAllowed =
+          repo === null ||
+          config.webhooks.allowed_repos.length === 0 ||
+          config.webhooks.allowed_repos.includes(repo);
+        if (repoAllowed) await flushPendingToSession(repo, entry);
+        await sendStatusLine(server, buildStatusText(entry));
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
+    "claim_notification",
+    [
+      "Claim exclusive ownership of work for a repo+branch before acting on a notification.",
+      "Returns: 'ok' (claimed), 'already_owned' (TTL extended), 'conflict:<who>' (stop), 'expired' (stop).",
+    ].join(" "),
+    {
+      claim_key: z
+        .string()
+        .describe(
+          "'{repo}:{branch}' from notification meta.claim_key, or construct from git remote + current branch",
+        ),
+    },
+    async ({ claim_key }) => {
+      const existing = workClaims.get(claim_key);
+      const ttl = config.server.claim_ttl_ms;
+      const myLabel = entry?.label ?? sessionId.slice(0, 8);
+
+      if (existing && Date.now() <= existing.expiresAt) {
+        if (existing.sessionId === sessionId) {
+          existing.expiresAt = Date.now() + ttl;
+          if (entry)
+            await sendStatusLine(server, buildStatusText(entry, claim_key, existing.expiresAt));
+          return { content: [{ type: "text" as const, text: "already_owned" }] };
+        }
+        const winner = existing.label ?? existing.sessionId.slice(0, 8);
+        return { content: [{ type: "text" as const, text: `conflict:${winner}` }] };
+      }
+
+      const expiresAt = Date.now() + ttl;
+      workClaims.set(claim_key, { sessionId, label: myLabel, expiresAt });
+      writeClaimFile(claim_key);
+      log(`Claim granted: ${myLabel} owns ${claim_key}`);
+      if (entry) await sendStatusLine(server, buildStatusText(entry, claim_key, expiresAt));
+      // Cancel fallback — session is handling the work
+      fallbackWorker.cancel(claim_key);
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+
+  server.tool(
+    "release_claim",
+    "Release the branch claim when work is complete. Frees the branch immediately.",
+    {
+      claim_key: z.string().describe("The same claim_key passed to claim_notification"),
+    },
+    async ({ claim_key }) => {
+      const existing = workClaims.get(claim_key);
+      if (!existing || existing.sessionId !== sessionId) {
+        return { content: [{ type: "text" as const, text: "not_owner" }] };
+      }
+      workClaims.delete(claim_key);
+      deleteClaimFile();
+      log(`Claim released: ${entry?.label ?? sessionId.slice(0, 8)} released ${claim_key}`);
+      if (entry) await sendStatusLine(server, buildStatusText(entry));
+      return { content: [{ type: "text" as const, text: "released" }] };
+    },
+  );
+
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => {
+      const id = randomUUID();
+      sessionId = id;
+      return id;
+    },
+    eventStore: new NotificationEventStore(),
+    onsessioninitialized: (id) => {
+      sessionId = id;
+      entry = {
+        server,
+        transport,
+        github_username: profile.github_username,
+        repo: null,
+        branch: null,
+        label: null,
+        worktree_path: null,
+        lastActivityAt: Date.now(),
+      };
+      sessions.set(id, entry);
+      addUserSession(profile.github_username, id);
+      log(
+        `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
+      );
+    },
+    onsessionclosed: (id) => {
+      const session = sessions.get(id);
+      if (session) removeUserSession(session.github_username, id);
+      sessions.delete(id);
+      for (const [k, c] of workClaims) {
+        if (c.sessionId === id) {
+          workClaims.delete(k);
+          log(`Claim cleared on disconnect: ${k}`);
+        }
+      }
+      log(
+        `Session disconnected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
+      );
+    },
+  });
+
+  return { server, transport };
+}
+
+// ── Notification routing ──────────────────────────────────────────────────────
+
+const routeToSessions: NotifyFn = async (
+  notification: CINotification,
+  routing: RoutingKey,
+): Promise<void> => {
+  const claimKey = claimKeyFor(routing);
+  const existing = workClaims.get(claimKey);
+
+  // Pre-routing: active claim → send only to the owner
+  if (existing && Date.now() <= existing.expiresAt) {
+    const ownerSession = sessions.get(existing.sessionId);
+    if (ownerSession) {
+      const enriched = enrichNotification(notification, claimKey, "owned");
+      try {
+        await sendChannelNotification(ownerSession.server, enriched);
+        log(
+          `Routed to claim owner ${existing.label ?? existing.sessionId.slice(0, 8)}: ${claimKey}`,
+        );
+      } catch (err) {
+        log("Failed to push to claim owner — clearing stale claim, re-broadcasting:", err);
+        workClaims.delete(claimKey);
+      }
+      return;
+    }
+    log(`Claim owner for ${claimKey} is gone — clearing claim, re-broadcasting`);
+    workClaims.delete(claimKey);
+  }
+
+  const { recipients, mode } = selectHubRecipients(routing, sessions, userSessions);
+
+  if (recipients.length === 0) {
+    log(`No session found for ${routing.repo}@${routing.branch ?? "*"} — queuing for replay.`);
+    enqueuePending(routing, notification);
+    maybeStartFallback(claimKey, notification, routing);
+    return;
+  }
+
+  if (mode === "catchall") {
+    log(
+      `⚠️  No session on ${routing.branch ?? "*"} — using catch-all (${recipients.length} sessions)`,
+    );
+  }
+
+  const enriched = enrichNotification(notification, claimKey, mode);
+  let sent = 0;
+  for (const session of recipients) {
+    try {
+      await sendChannelNotification(session.server, enriched);
+      sent++;
+    } catch (err) {
+      log("Failed to push notification to session:", err);
+    }
+  }
+  if (sent > 0) {
+    const names = [...new Set(recipients.map((s) => s.github_username))].join(", ");
+    log(`Pushed to ${sent} session(s) (${names}): ${routing.repo}@${routing.branch ?? "*"}`);
+    // Start fallback timer even after delivery — fires if no session claims within timeout
+    maybeStartFallback(claimKey, notification, routing);
+  }
+};
+
+function maybeStartFallback(
+  claimKey: string,
+  notification: CINotification,
+  routing: RoutingKey,
+): void {
+  const authorUsername = routing.pr_author ?? null;
+  if (!authorUsername) return;
+  const profile = [...tokenMap.values()].find((u) => u.github_username === authorUsername);
+  if (!profile) return;
+  const eventType = notification.meta.event_type ?? "on_pr_review";
+  fallbackWorker.watch(claimKey, notification, routing, profile, eventType);
+}
+
+// ── MCP HTTP server ───────────────────────────────────────────────────────────
+
+const MCP_PORT = Number(process.env.MCP_PORT ?? 9444);
+
+function startMcpServer(): void {
+  Bun.serve({
+    port: MCP_PORT,
+    // NOT restricted to 127.0.0.1 — hub is exposed via a reverse proxy that handles TLS.
+    // The proxy should enforce HTTPS; this server trusts the proxy.
+    idleTimeout: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      if (url.pathname === "/") {
+        return new Response(
+          JSON.stringify({ status: "ok", server: "claude-beacon-hub", sessions: sessions.size }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (req.method === "POST" && url.pathname === "/release-claim") {
+        let body: unknown;
+        try {
+          body = await req.json();
+        } catch {
+          return new Response("Bad Request", { status: 400 });
+        }
+        const claimKey =
+          typeof (body as Record<string, unknown>)?.claim_key === "string"
+            ? (body as Record<string, string>).claim_key
+            : null;
+        if (!claimKey || !workClaims.has(claimKey)) {
+          return new Response("not_found", { status: 404 });
+        }
+        workClaims.delete(claimKey);
+        deleteClaimFile();
+        fallbackWorker.cancel(claimKey);
+        log(`Claim released via HTTP: ${claimKey}`);
+        return new Response("released", { status: 200 });
+      }
+
+      if (url.pathname !== "/mcp") {
+        return new Response("Not Found", { status: 404 });
+      }
+
+      // ── Bearer auth ────────────────────────────────────────────────────────
+      const profile = bearerAuth(req, tokenMap);
+      if (!profile) {
+        return new Response("Unauthorized — valid Bearer token required", {
+          status: 401,
+          headers: { "WWW-Authenticate": 'Bearer realm="claude-beacon-hub"' },
+        });
+      }
+
+      const sessionId = req.headers.get("mcp-session-id");
+
+      if (sessionId) {
+        const session = sessions.get(sessionId);
+        if (!session) return new Response("Session not found", { status: 404 });
+        // Security: token must match the session's registered user
+        if (session.github_username !== profile.github_username) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        session.lastActivityAt = Date.now();
+        return session.transport.handleRequest(req);
+      }
+
+      if (req.method !== "POST") {
+        return new Response("Bad Request — send POST to initialize a new session", { status: 400 });
+      }
+
+      const { server, transport } = createHubSession(profile);
+      await server.connect(transport);
+      return transport.handleRequest(req);
+    },
+  });
+  log(`MCP HTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
+  log("Reverse proxy required for HTTPS. nginx: add 'proxy_read_timeout 0' for SSE.");
+}
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
+
+if (import.meta.main) {
+  const cliArgs = process.argv.slice(2);
+
+  if (cliArgs.includes("--help") || cliArgs.includes("-h")) {
+    process.stdout.write(`claude-beacon-hub — Company-wide multi-user hub server
+
+Usage:
+  claude-beacon-hub --config <path/to/hub-config.yaml>
+
+Required:
+  --config <path>   YAML config file with a 'hub:' section (see config.example.yaml)
+
+Environment variables (put in .env):
+  GITHUB_WEBHOOK_SECRET   HMAC-SHA256 secret matching your GitHub App webhook
+  GITHUB_TOKEN            PAT with Actions:Read + Pull requests:Read
+  ANTHROPIC_API_KEY       Required when any user has fallback.enabled: true
+  WEBHOOK_PORT            Webhook receiver port (default: 9443)
+  MCP_PORT                MCP HTTP port (default: 9444)
+
+User onboarding (admin generates tokens; each user adds to their ~/.mcp.json):
+  {
+    "mcpServers": {
+      "claude-beacon": {
+        "url": "https://beacon.company.com/mcp",
+        "type": "http",
+        "headers": { "Authorization": "Bearer <their-token>" }
+      }
+    }
+  }
+
+Then: claude --dangerously-load-development-channels server:claude-beacon
+And call set_filter once per session (same as mux mode).
+
+Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n`);
+    process.exit(0);
+  }
+
+  const configIdx = cliArgs.indexOf("--config");
+  const configPath = configIdx !== -1 ? (cliArgs[configIdx + 1] ?? null) : null;
+
+  if (!configPath) {
+    process.stderr.write(
+      "ERROR: --config <path> is required for claude-beacon-hub.\n" +
+        "Run with --help for usage.\n",
+    );
+    process.exit(1);
+  }
+
+  try {
+    const loaded = loadHubConfig(configPath);
+    config = loaded.config;
+    hubConfig = loaded.hub;
+    log(`Loaded hub config from ${configPath}: ${hubConfig.users.length} user(s)`);
+  } catch (err) {
+    process.stderr.write(`ERROR: Failed to load config: ${err}\n`);
+    process.exit(1);
+  }
+
+  // Build token → profile lookup map
+  tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
+  // Hub derives allowed_authors from registered users (no --author flag)
+  config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
+
+  log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
+
+  // Validate GITHUB_TOKEN at startup
+  {
+    log(`Working directory: ${process.cwd()} (Bun loads .env from here)`);
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) {
+      log("WARNING: GITHUB_TOKEN is not set. Log fetching and fallback PR comments will not work.");
+    } else {
+      log(`GITHUB_TOKEN found: ${token.slice(0, 8)}...`);
+    }
+  }
+
+  // Initialise fallback worker (depends on hubConfig)
+  fallbackWorker = new FallbackWorker(hubConfig);
+
+  startMcpServer();
+
+  try {
+    const webhookServer = startWebhookServer(routeToSessions, config);
+    log(`Webhook server listening on http://localhost:${webhookServer.port}`);
+  } catch (err: unknown) {
+    const isAddrInUse =
+      typeof err === "object" && err !== null && "code" in err && err.code === "EADDRINUSE";
+    process.stderr.write(
+      isAddrInUse
+        ? `ERROR: Port ${config.server.port} is already in use.\n`
+        : `ERROR: Failed to start webhook server: ${err}\n`,
+    );
+    process.exit(1);
+  }
+
+  log("Hub ready — waiting for Claude Code sessions and GitHub webhook events.");
+} // end import.meta.main

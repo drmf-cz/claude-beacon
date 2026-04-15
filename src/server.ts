@@ -34,6 +34,12 @@ export interface RoutingKey {
   repo: string;
   /** Branch the event originated from. null = send to all sessions for this repo. */
   branch: string | null;
+  /**
+   * GitHub login of the PR author (or workflow triggerer for CI events).
+   * Populated by extractEventRouting(); used in hub mode for Tier-0 author-based routing.
+   * null when the author cannot be determined from the payload.
+   */
+  pr_author?: string | null;
 }
 
 /**
@@ -1284,14 +1290,21 @@ export function extractEventRouting(event: string, payload: GitHubWebhookPayload
   const repo = payload.repository?.full_name ?? "unknown";
 
   if (event === "workflow_run") {
-    return { repo, branch: payload.workflow_run?.head_branch ?? null };
+    return {
+      repo,
+      branch: payload.workflow_run?.head_branch ?? null,
+      // sender is the actor who triggered the run; best proxy for the commit author
+      pr_author: payload.sender?.login ?? null,
+    };
   }
 
   if (event === "pull_request" || REVIEW_EVENTS.has(event)) {
-    return { repo, branch: payload.pull_request?.head.ref ?? null };
+    // For review/comment events, route by the PR author (not the reviewer)
+    const prAuthor = payload.pull_request?.user.login ?? payload.issue?.user.login ?? null;
+    return { repo, branch: payload.pull_request?.head.ref ?? null, pr_author: prAuthor };
   }
 
-  return { repo, branch: null };
+  return { repo, branch: null, pr_author: payload.sender?.login ?? null };
 }
 
 /** Returns a skip response if the event or repo is not in the configured allowlists, null otherwise. */

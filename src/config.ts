@@ -235,6 +235,85 @@ export interface Config {
   code_style: string;
 }
 
+// ── Hub Mode Types ─────────────────────────────────────────────────────────────
+
+/**
+ * Skill name overrides for a specific hub user.
+ * Each key maps to the skill invoked for that event type.
+ * Empty string means "use the server-level behavior default".
+ */
+export type HubSkillMap = Partial<
+  Record<
+    "on_pr_review" | "on_ci_failure" | "on_merge_conflict" | "on_pr_opened" | "on_pr_approved",
+    string
+  >
+>;
+
+/** Per-user fallback settings (override the hub-level defaults). */
+export interface HubUserFallback {
+  /** Whether the fallback worker is enabled for this user. Default: hub.fallback.enabled */
+  enabled?: boolean;
+  /** Milliseconds to wait for a claim before triggering fallback. Default: hub.fallback.timeout_ms */
+  timeout_ms?: number;
+}
+
+/**
+ * A developer registered on the hub.
+ * Admin configures these in the YAML; users connect with their token via Bearer auth.
+ */
+export interface HubUserProfile {
+  /** GitHub login (case-sensitive) — used to route PR/CI events to this user. */
+  github_username: string;
+  /**
+   * Pre-shared Bearer token for this user's MCP connection.
+   * Generate with: openssl rand -hex 32
+   */
+  token: string;
+  /** Per-event skill name overrides. Falls back to server-level behavior config. */
+  skills?: HubSkillMap;
+  /** Fallback worker settings for this user. */
+  fallback?: HubUserFallback;
+}
+
+/** Hub-wide fallback worker configuration. */
+export interface HubFallbackConfig {
+  /**
+   * Whether to enable the fallback worker globally.
+   * Can be overridden per user. Default: false.
+   */
+  enabled: boolean;
+  /**
+   * Milliseconds after dispatch with no claim before fallback fires.
+   * Default: 900000 (15 minutes).
+   */
+  timeout_ms: number;
+  /** Anthropic model ID used by the fallback worker. Default: "claude-sonnet-4-6" */
+  model: string;
+  /**
+   * When true, the fallback worker posts a comment on the PR summarising what it did.
+   * Default: true.
+   */
+  notify_via_pr_comment: boolean;
+}
+
+/**
+ * Hub-mode configuration block.
+ * Present only when running claude-beacon-hub; ignored by claude-beacon-mux.
+ */
+export interface HubConfig {
+  /** Registered users. Must be non-empty; tokens must be unique. */
+  users: HubUserProfile[];
+  /** Global fallback defaults — overridden per user via user.fallback. */
+  fallback: HubFallbackConfig;
+}
+
+const DEFAULT_HUB_FALLBACK: HubFallbackConfig = {
+  enabled: false,
+  timeout_ms: 15 * 60 * 1000,
+  model: "claude-sonnet-4-6",
+  notify_via_pr_comment: true,
+};
+
 // ── Defaults ──────────────────────────────────────────────────────────────────
 // Mirrors the hardcoded behaviour that existed before the config system.
 // Environment variables still take precedence over the YAML for server settings.
@@ -473,4 +552,87 @@ export function loadConfig(filePath: string): Config {
     throw new Error(`Config file must be a YAML object: ${filePath}`);
   }
   return deepMerge(DEFAULT_CONFIG, parsed as Partial<Config>);
+}
+
+/**
+ * Load a hub-mode YAML config file.
+ * Returns both the base Config (deep-merged with defaults) and the HubConfig.
+ *
+ * Validates that:
+ * - The file has a `hub.users` array with at least one entry
+ * - Every user has a non-empty github_username and token
+ * - All tokens are unique
+ *
+ * @throws if the file is invalid or hub.users fails validation.
+ */
+export function loadHubConfig(filePath: string): { config: Config; hub: HubConfig } {
+  if (!existsSync(filePath)) {
+    throw new Error(`Hub config file not found: ${filePath}`);
+  }
+  const raw = readFileSync(filePath, "utf8");
+  const parsed = parse(raw) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Hub config file must be a YAML object: ${filePath}`);
+  }
+  const doc = parsed as Record<string, unknown>;
+
+  // Extract and validate hub section
+  const rawHub = doc.hub as Record<string, unknown> | undefined;
+  if (!rawHub || typeof rawHub !== "object") {
+    throw new Error(`Hub config missing required 'hub:' section in ${filePath}`);
+  }
+
+  const rawUsers = rawHub.users;
+  if (!Array.isArray(rawUsers) || rawUsers.length === 0) {
+    throw new Error(`hub.users must be a non-empty array in ${filePath}`);
+  }
+
+  const users: HubUserProfile[] = rawUsers.map((u: unknown, i: number) => {
+    if (typeof u !== "object" || u === null) {
+      throw new Error(`hub.users[${i}] must be an object`);
+    }
+    const user = u as Record<string, unknown>;
+    if (typeof user.github_username !== "string" || user.github_username === "") {
+      throw new Error(`hub.users[${i}].github_username must be a non-empty string`);
+    }
+    if (typeof user.token !== "string" || user.token === "") {
+      throw new Error(`hub.users[${i}].token must be a non-empty string`);
+    }
+    const skills = user.skills as HubSkillMap | undefined;
+    const fallback = user.fallback as HubUserFallback | undefined;
+    return {
+      github_username: user.github_username as string,
+      token: user.token as string,
+      ...(skills !== undefined && { skills }),
+      ...(fallback !== undefined && { fallback }),
+    };
+  });
+
+  // Enforce unique tokens
+  const seenTokens = new Set<string>();
+  for (const user of users) {
+    if (seenTokens.has(user.token)) {
+      throw new Error(`hub.users contains duplicate token for user '${user.github_username}'`);
+    }
+    seenTokens.add(user.token);
+  }
+
+  // Merge hub-level fallback with defaults
+  const rawFallback = (rawHub.fallback as Partial<HubFallbackConfig> | undefined) ?? {};
+  const fallback: HubFallbackConfig = {
+    enabled: rawFallback.enabled ?? DEFAULT_HUB_FALLBACK.enabled,
+    timeout_ms: rawFallback.timeout_ms ?? DEFAULT_HUB_FALLBACK.timeout_ms,
+    model: rawFallback.model ?? DEFAULT_HUB_FALLBACK.model,
+    notify_via_pr_comment:
+      rawFallback.notify_via_pr_comment ?? DEFAULT_HUB_FALLBACK.notify_via_pr_comment,
+  };
+
+  const hub: HubConfig = { users, fallback };
+
+  // Also build the base config (without the hub section interfering with deepMerge)
+  const { hub: _hub, ...docWithoutHub } = doc as { hub: unknown } & Record<string, unknown>;
+  void _hub;
+  const config = deepMerge(DEFAULT_CONFIG, docWithoutHub as Partial<Config>);
+
+  return { config, hub };
 }

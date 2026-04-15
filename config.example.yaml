@@ -280,3 +280,40 @@ code_style: ""
 #   - All exported symbols must have JSDoc comments.
 #   - Tests go in src/__tests__/ as *.test.ts files using bun:test.
 #   - Format with Biome before committing.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hub mode configuration
+# Used by: claude-beacon-hub (NOT claude-beacon-mux)
+# See: docs/hub-mode.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+# hub:
+#   # Global fallback defaults — can be overridden per user.
+#   # The fallback worker calls the Anthropic API when a user's sessions are
+#   # unresponsive for fallback.timeout_ms. Requires ANTHROPIC_API_KEY in .env.
+#   fallback:
+#     enabled: false              # Opt in globally (or per-user below)
+#     timeout_ms: 900000          # 15 minutes before fallback fires
+#     model: "claude-sonnet-4-6"  # Anthropic model used by the fallback worker
+#     notify_via_pr_comment: true # Post a PR comment with the fallback summary
+#
+#   # Registered users. Generate tokens with: openssl rand -hex 32
+#   # admin configures these; share each token with the corresponding developer.
+#   users:
+#     - github_username: martinv          # GitHub login (case-sensitive)
+#       token: "REPLACE_WITH_GENERATED_TOKEN"
+#       skills:                           # Per-event skill overrides (optional)
+#         on_pr_review: "pr-comment-response"
+#         on_ci_failure: ""               # Empty = use server behavior default
+#       fallback:
+#         enabled: true
+#         timeout_ms: 900000
+#
+#     - github_username: alice
+#       token: "REPLACE_WITH_GENERATED_TOKEN"
+#       # No skills or fallback override — inherits hub defaults
+#
+#     - github_username: bob
+#       token: "REPLACE_WITH_GENERATED_TOKEN"
+#       fallback:
+#         enabled: false                  # Opt out of fallback for this user

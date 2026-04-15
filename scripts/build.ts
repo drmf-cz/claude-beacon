@@ -5,6 +5,7 @@
  * Output:
  *   dist/index.js   — standalone MCP server (stdio, one session)
  *   dist/mux.js     — mux server (HTTP, multi-session)
+ *   dist/hub.js     — hub server (HTTP, multi-user, company-wide)
  *
  * Each output file gets a #!/usr/bin/env bun shebang and is chmod +x'd
  * so it can be used directly as a bin entry in package.json.
@@ -16,6 +17,7 @@ import { $ } from "bun";
 const entries: Array<{ src: string; out: string }> = [
   { src: "src/index.ts", out: "dist/index.js" },
   { src: "src/mux.ts", out: "dist/mux.js" },
+  { src: "src/hub.ts", out: "dist/hub.js" },
 ];
 
 for (const { src, out } of entries) {
