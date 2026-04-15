@@ -32,8 +32,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { z } from "zod";
 import { parse } from "yaml";
+import { z } from "zod";
 import type { Config, HubConfig, HubUserBehavior, HubUserProfile } from "./config.js";
 import { DEFAULT_CONFIG, loadHubConfig, resolveUserConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
@@ -739,9 +739,7 @@ function createHubSession(profile: HubUserProfile): {
       if (entry) {
         entry.behavior = parsed as Partial<HubUserBehavior>;
       }
-      log(
-        `Behavior set for @${profile.github_username} (session ${sessionId.slice(0, 8)})`,
-      );
+      log(`Behavior set for @${profile.github_username} (session ${sessionId.slice(0, 8)})`);
       return {
         content: [
           {
