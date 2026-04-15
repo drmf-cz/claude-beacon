@@ -1076,9 +1076,8 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     }
 
     tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
-    const hubAuthors = hubConfig.users.map((u) => u.github_username);
-    config = { ...config, webhooks: { ...config.webhooks, allowed_authors: hubAuthors } };
-    log(`Hub users: ${hubAuthors.join(", ")}`);
+    config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
+    log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
   } else {
     // ── Single-user --author mode ────────────────────────────────────────────
     // Load .env from CWD (no config file path to derive from).
@@ -1109,10 +1108,8 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
         notify_via_pr_comment: true,
       },
     };
-    config = {
-      ...DEFAULT_CONFIG,
-      webhooks: { ...DEFAULT_CONFIG.webhooks, allowed_authors: [authorArg as string] },
-    };
+    config = { ...DEFAULT_CONFIG };
+    config.webhooks.allowed_authors = [authorArg as string];
     tokenMap = new Map([[bearerToken, profile]]);
 
     const mcpPort = Number(process.env.MCP_PORT ?? 9444);
