@@ -18,7 +18,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "start:mux": "bun run src/mux.ts",
-    "start:hub": "bun run src/hub.ts",
+    "start:hub": "bun run src/hub.ts --config hub-config.yaml",
     "build": "bun run scripts/build.ts",
     "prepublishOnly": "bun test && bun run build",
     "typecheck": "tsc --noEmit",
