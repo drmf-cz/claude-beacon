@@ -195,9 +195,8 @@ Admins share each user's token out-of-band. Each developer registers the hub as 
 claude mcp remove claude-beacon
 
 # Add the hub with your Bearer token
-claude mcp add --transport http \
-  --header "Authorization: Bearer <your-token>" \
-  claude-beacon https://beacon.company.com/mcp
+claude mcp add --transport http claude-beacon https://beacon.company.com/mcp \
+  --header "Authorization: Bearer <your-token>"
 ```
 
 **Option B — edit `~/.mcp.json` directly:**

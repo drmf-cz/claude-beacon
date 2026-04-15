@@ -246,9 +246,8 @@ GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
 claude mcp remove claude-beacon
 
 # Add hub entry with your Bearer token
-claude mcp add --transport http \
-  --header "Authorization: Bearer $TOKEN" \
-  claude-beacon http://127.0.0.1:9444/mcp
+claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp \
+  --header "Authorization: Bearer $TOKEN"
 ```
 
 Or edit `~/.mcp.json` directly:
