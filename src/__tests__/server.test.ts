@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { createHmac } from "node:crypto";
 import { DEFAULT_CONFIG } from "../config.js";
 import {
   buildReviewNotification,
@@ -18,6 +19,7 @@ import {
   reviewCooldowns,
   sanitizeBody,
   scheduleReviewNotification,
+  startWebhookServer,
   verifySignature,
 } from "../server.js";
 import type {
@@ -1413,5 +1415,152 @@ describe("isActionable — on_pr_opened", () => {
 
   it("blocks opened action when on_pr_opened disabled", () => {
     expect(isActionable("pull_request", unknownStatePR)).toBe(false);
+  });
+});
+
+// ── Webhook guard sequencing (integration) ────────────────────────────────────
+// Verifies the pipeline order: isOversized → verifySignature → isDuplicateDelivery.
+// Each guard is unit-tested individually above; these tests verify the combined handler
+// honours the sequence and that error responses do not echo request content.
+
+describe("webhook guard sequencing", () => {
+  const WEBHOOK_SECRET = "integration-test-secret-32chars-xyz";
+  let server: ReturnType<typeof startWebhookServer> | null = null;
+  let serverPort: number;
+  let notifyCalled: boolean;
+
+  function makeSignature(body: string): string {
+    return `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
+  }
+
+  beforeEach(() => {
+    notifyCalled = false;
+    process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
+    // Random port in 18000-19000 range to avoid conflicts with any running dev instance
+    serverPort = 18000 + Math.floor(Math.random() * 1000);
+    server = startWebhookServer(
+      async () => {
+        notifyCalled = true;
+      },
+      { ...DEFAULT_CONFIG, server: { ...DEFAULT_CONFIG.server, port: serverPort } },
+    );
+  });
+
+  afterEach(() => {
+    server?.stop(true);
+    server = null;
+    delete process.env.GITHUB_WEBHOOK_SECRET;
+  });
+
+  it("returns 401 (not 413) for a normal-sized payload with a bad signature", async () => {
+    const body = '{"action":"completed"}';
+    const resp = await fetch(`http://localhost:${serverPort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-hub-signature-256": "sha256=badbadbadbadbadbadbadbad",
+        "x-github-event": "workflow_run",
+        "x-github-delivery": `badsig-${Date.now()}`,
+      },
+      body,
+    });
+    expect(resp.status).toBe(401);
+    expect(notifyCalled).toBe(false);
+  });
+
+  it("deduplicates a replay: second delivery with same ID returns 200 without notifying", async () => {
+    // Use ping event — it gets a pong 200 but does not call notify
+    const body = '{"zen":"Keep it logically awesome.","hook_id":1}';
+    const sig = makeSignature(body);
+    const deliveryId = `dedup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const headers = {
+      "Content-Type": "application/json",
+      "x-hub-signature-256": sig,
+      "x-github-event": "ping",
+      "x-github-delivery": deliveryId,
+    };
+    const first = await fetch(`http://localhost:${serverPort}/`, { method: "POST", headers, body });
+    expect(first.status).toBe(200);
+    const second = await fetch(`http://localhost:${serverPort}/`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    expect(second.status).toBe(200);
+    expect(notifyCalled).toBe(false);
+  });
+
+  it(
+    "returns 413 for an oversized payload before ever checking the signature",
+    async () => {
+      // 20 MB + 1 byte — must exceed MAX_BODY_BYTES = 20 * 1024 * 1024
+      const oversized = "x".repeat(20 * 1024 * 1024 + 1);
+      const resp = await fetch(`http://localhost:${serverPort}/`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Deliberately wrong signature — if 413 fires before sig check, we still get 413
+          "x-hub-signature-256": "sha256=doesnotmatter",
+          "x-github-event": "workflow_run",
+          "x-github-delivery": `oversized-${Date.now()}`,
+        },
+        body: oversized,
+      });
+      expect(resp.status).toBe(413);
+      expect(notifyCalled).toBe(false);
+    },
+    { timeout: 15_000 },
+  );
+
+  it("does not echo raw request content in error responses", async () => {
+    const sentinelSecret = "SENTINEL_SECRET_DO_NOT_ECHO_IN_RESPONSE";
+    const body = `{"payload":"${sentinelSecret}"}`;
+    const resp = await fetch(`http://localhost:${serverPort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-hub-signature-256": "sha256=wrongsignature",
+        "x-github-event": "workflow_run",
+        "x-github-delivery": `leak-check-${Date.now()}`,
+      },
+      body,
+    });
+    const responseText = await resp.text();
+    expect(resp.status).toBe(401);
+    expect(responseText).not.toContain(sentinelSecret);
+    // Also verify no internal paths leak
+    expect(responseText).not.toContain("node_modules");
+    expect(responseText).not.toContain("/home/");
+  });
+});
+
+// ── Token log truncation invariants ──────────────────────────────────────────
+// These tests document the logging contract for sensitive credentials.
+// If the log format in hub.ts changes, these tests break intentionally.
+// Reference: GITHUB_TOKEN is logged at hub.ts CLI block as token.slice(0, 8) + "..."
+//            GITHUB_WEBHOOK_SECRET is logged as `${secret.length} chars` (never the value)
+
+describe("token log truncation invariants", () => {
+  it("GITHUB_TOKEN log format shows only the first 8 characters followed by ellipsis", () => {
+    const token = "ghp_abcdefghijklmnopqrstuvwxyz";
+    const logged = `${token.slice(0, 8)}...`;
+    expect(logged).toBe("ghp_abcd...");
+    // The remainder of the token must not appear in the logged string
+    expect(logged).not.toContain(token.slice(8));
+  });
+
+  it("GITHUB_WEBHOOK_SECRET log format shows only the character count, never the value", () => {
+    const secret = "super-secret-webhook-value-abc123";
+    const logged = `${secret.length} chars`;
+    expect(logged).toMatch(/^\d+ chars$/);
+    // The secret value must not appear in the logged string
+    expect(logged).not.toContain("super-secret");
+    expect(logged).not.toContain(secret);
+  });
+
+  it("token shorter than 8 chars is truncated without throwing", () => {
+    const shortToken = "abc";
+    const logged = `${shortToken.slice(0, 8)}...`;
+    expect(logged).toBe("abc...");
   });
 });

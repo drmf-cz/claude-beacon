@@ -1471,13 +1471,20 @@ function handleParsedReviewEvent(
   parsed: ReviewPayload,
   config: Config,
   notify: NotifyFn,
+  configResolver?: (routing: RoutingKey) => Config,
 ): void {
   const { reviewEvent, prMeta } = parsed;
   // Skip notifications for comments posted by allowed authors themselves.
   // When Claude (or the repo owner) replies to a review thread, that reply
   // fires a new webhook — without this guard it would re-trigger the whole
   // review cycle.
-  if (isAuthorAllowed(reviewEvent.rawLogin, config.webhooks.allowed_authors)) {
+  // Set webhooks.skip_own_comments: false to disable this guard when you want
+  // Claude to react to your own PR comments (you are then responsible for
+  // avoiding feedback loops).
+  if (
+    config.webhooks.skip_own_comments &&
+    isAuthorAllowed(reviewEvent.rawLogin, config.webhooks.allowed_authors)
+  ) {
     log(
       `[skip] PR #${prMeta.prNumber} review event from ${reviewEvent.reviewer} — own comment, not re-notifying`,
     );
@@ -1485,12 +1492,13 @@ function handleParsedReviewEvent(
   }
   const key = `${prMeta.repo}/${prMeta.prNumber}`;
   const routing = extractEventRouting(event, payload);
+  const effectiveConfig = configResolver ? configResolver(routing) : config;
   const accepted = scheduleReviewNotification(
     key,
     prMeta,
     reviewEvent,
     async (evts, meta) => {
-      const notification = buildReviewNotification(evts, meta, config);
+      const notification = buildReviewNotification(evts, meta, effectiveConfig);
       try {
         await notify(notification, routing);
         log(`PR review notification sent for PR #${meta.prNumber} (${evts.length} event(s))`);
@@ -1513,6 +1521,7 @@ function handleReviewEvents(
   payloadRepo: string | undefined,
   config: Config,
   notify: NotifyFn,
+  configResolver?: (routing: RoutingKey) => Config,
 ): Response {
   const approvedNotification = parsePRApprovedEvent(event, payload.action, payload, config);
   if (approvedNotification) {
@@ -1521,7 +1530,7 @@ function handleReviewEvents(
   }
   const parsed = parseReviewWebhookPayload(event, payload.action, payload, config);
   if (parsed) {
-    handleParsedReviewEvent(event, payload, parsed, config, notify);
+    handleParsedReviewEvent(event, payload, parsed, config, notify, configResolver);
   } else {
     logReviewSkipReason(event, payload);
   }
@@ -1533,13 +1542,19 @@ function handleReviewEvents(
 /**
  * Start the HTTP webhook receiver.
  *
- * @param notify  Called for every actionable event. In standalone mode this
- *                pushes to the embedded MCP session; in mux mode it routes to
- *                connected HTTP sessions.
+ * @param notify          Called for every actionable event. In standalone mode this
+ *                        pushes to the embedded MCP session; in mux mode it routes to
+ *                        connected HTTP sessions.
+ * @param config          Global config (defaults, server settings, webhook filters).
+ * @param configResolver  Optional per-routing config override. When provided (hub mode),
+ *                        the resolved config is used for notification building so that
+ *                        each user can have their own instruction templates and code style.
+ *                        Falls back to `config` for unknown authors.
  */
 export function startWebhookServer(
   notify: NotifyFn,
   config: Config = DEFAULT_CONFIG,
+  configResolver?: (routing: RoutingKey) => Config,
 ): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port: config.server.port,
@@ -1621,7 +1636,7 @@ export function startWebhookServer(
 
       // ── PR Review / Comment events (debounced) ──────────────────────────────
       if (REVIEW_EVENTS.has(event)) {
-        return handleReviewEvents(event, payload, payloadRepo, config, notify);
+        return handleReviewEvents(event, payload, payloadRepo, config, notify, configResolver);
       }
 
       if (!isActionable(event, payload, config.behavior.on_pr_opened)) {
@@ -1639,10 +1654,15 @@ export function startWebhookServer(
         return new Response("Skipped", { status: 200 });
       }
 
+      // Resolve routing first so configResolver can select per-user config for
+      // notification building (e.g. per-user code_style or instruction overrides).
+      const routing = extractEventRouting(event, payload);
+      const effectiveConfig = configResolver ? configResolver(routing) : config;
+
       const notification =
         event === "pull_request"
-          ? parsePullRequestEvent(payload, config)
-          : parseWorkflowEvent(event, payload, config);
+          ? parsePullRequestEvent(payload, effectiveConfig)
+          : parseWorkflowEvent(event, payload, effectiveConfig);
 
       if (!notification) {
         // parse functions log the specific reason — this is just the outer guard
@@ -1650,7 +1670,6 @@ export function startWebhookServer(
         return new Response("OK", { status: 200 });
       }
 
-      const routing = extractEventRouting(event, payload);
       try {
         await notify(notification, routing);
       } catch (err) {

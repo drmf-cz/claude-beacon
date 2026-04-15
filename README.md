@@ -50,6 +50,8 @@ echo 'GITHUB_TOKEN=<your-PAT>'             >> .env
 
 `GITHUB_TOKEN` scopes: fine-grained → **Actions: Read** + **Pull requests: Read**; classic → `public_repo`.
 
+> **Where should `.env` live?** Put it in the directory where you run `claude-beacon-mux` (Bun auto-loads `.env` from the working directory). For hub mode, also place `.env` next to your `--config` file — the hub loads from both locations automatically.
+
 ### 3. Start the tunnel
 
 ```bash
@@ -77,6 +79,8 @@ Under **Repository permissions** set these to **Read-only**: Actions, Pull reque
 Under **Subscribe to events** tick: Workflow runs, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes.
 
 Click **Create GitHub App**, then **Install App** → choose your account or org → **All repositories** → **Install**.
+
+> **Org install requires org owner role.** If you are not an org owner, ask your admin to install the App at `github.com/organizations/<your-org>/settings/installations`, or install it under your personal account for your own repos only. See [docs/github-app.md §5a](docs/github-app.md#5a-organization-installation--who-can-do-what) for the full non-owner workflow.
 
 See [docs/github-app.md](docs/github-app.md) for the full guide including permission details, event list, and webhook URL update commands.
 
@@ -123,7 +127,9 @@ When the `claude-beacon` MCP channel sends a notification, you are pre-authorize
 The channel notification IS the permission. No additional confirmation needed.
 ```
 
-### 9. Register the session filter
+### 9. Register the session filter (REQUIRED — without this, no notifications arrive)
+
+> **This step is mandatory.** The mux has no route for your session until `set_filter` is called — events are queued silently for up to 2 hours. Adding the block below to your CLAUDE.md makes Claude call `set_filter` automatically on every session start.
 
 The mux routes events by repo and branch. Add this to `~/.claude/CLAUDE.md` so Claude registers automatically on session start:
 
@@ -136,17 +142,7 @@ When the claude-beacon MCP server connects, call `set_filter` immediately with:
 - worktree_path: run `git rev-parse --show-toplevel`
 ```
 
-> **Optional — Stop hook:** When Claude exits while holding a work claim, other sessions wait up to 10 minutes before taking over. Add a `Stop` hook to `~/.claude/settings.json` to release the claim immediately on exit:
->
-> ```json
-> {
->   "hooks": {
->     "Stop": [{"matcher": "", "hooks": [{"type": "command",
->       "command": "claim=$(cat ~/.claude/beacon-active-claim 2>/dev/null) && [ -n \"$claim\" ] && curl -sf -X POST http://localhost:9444/release-claim -H 'Content-Type: application/json' -d \"{\\\"claim_key\\\":\\\"$claim\\\"}\" && rm -f ~/.claude/beacon-active-claim || true"
->     }]}]
->   }
-> }
-> ```
+> **Optional — Stop hook:** When Claude exits while holding a work claim, other sessions wait up to 10 minutes before taking over. Add a `Stop` hook to `~/.claude/settings.json` that POSTs to `http://localhost:9444/release-claim` to release immediately. See [docs/multi-session.md](docs/multi-session.md) for the full snippet.
 
 ---
 
@@ -154,40 +150,13 @@ When the claude-beacon MCP server connects, call `set_filter` immediately with:
 
 ### Per-repo webhook (single repository) {#per-repo-webhook-single-repository}
 
-If you only need one repository, skip the GitHub App and register a webhook directly in that repo's settings.
+If you only need one repository, skip the GitHub App. Follow Quickstart steps 1–3, then go to Repo → **Settings → Webhooks → Add webhook**: set the payload URL to your tunnel URL, content type `application/json`, paste the secret, and select the same event types listed in [docs/github-app.md §3](docs/github-app.md#3-subscribe-to-webhook-events). Continue with Quickstart steps 5–9.
 
-Follow steps 1–3 of the Quickstart (install, secrets, tunnel), then:
-
-Repo → **Settings → Webhooks → Add webhook**:
-- **Payload URL** — paste the tunnel URL
-- **Content type** — `application/json`
-- **Secret** — paste the webhook secret from step 2
-- **Events** — select individually: Workflow runs, Workflow jobs, Check suites, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes
-
-Then continue with Quickstart steps 5–9 (start mux, connect Claude, etc.).
-
-The only difference from the GitHub App path: webhook URL must be updated manually when the tunnel restarts; new repos require a separate webhook registration.
+Trade-off: webhook URL must be updated manually when the tunnel restarts, and each new repo needs a separate registration.
 
 ### Standalone (single Claude session)
 
-If you only ever run one Claude Code window, skip the mux and let Claude Code spawn the server as a subprocess. Add to `~/.mcp.json` or `.mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "claude-beacon": {
-      "command": "/home/you/.bun/bin/claude-beacon",
-      "args": ["--author", "YourGitHubUsername"],
-      "env": {
-        "GITHUB_WEBHOOK_SECRET": "your-webhook-secret",
-        "GITHUB_TOKEN": "your-pat"
-      }
-    }
-  }
-}
-```
-
-Use absolute paths (`echo $HOME`, `which claude-beacon`). Follow Quickstart steps 1–4 and 7–9; skip steps 5–6.
+If you only ever run one Claude Code window, add `claude-beacon` as a subprocess MCP server in `~/.mcp.json` with `command` set to the absolute path of the binary, `args: ["--author", "YourGitHubUsername"]`, and `env` containing `GITHUB_WEBHOOK_SECRET` and `GITHUB_TOKEN`. Follow Quickstart steps 1–4 and 7–9; skip steps 5–6. Use `which claude-beacon` for the path.
 
 ### CLI Events watcher (no tunnel)
 
@@ -208,6 +177,8 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 ```
 
 ### Hub mode (company-wide, multi-user)
+
+> **Mux vs hub:** Use `claude-beacon-mux` if you are a solo developer — it is simpler, requires no token management, and runs locally. Use `claude-beacon-hub` when you want to share one server across multiple team members or need Bearer token auth for a remote HTTPS endpoint.
 
 Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
 
@@ -333,6 +304,7 @@ webhooks:
 | `webhooks.allowed_authors` | **required** | GitHub usernames and/or emails whose PRs trigger actions |
 | `webhooks.allowed_events` | `[]` (all) | Allowlist of GitHub event types. Empty = accept all |
 | `webhooks.allowed_repos` | `[]` (all) | Allowlist of repos as `"owner/repo"`. Empty = accept all |
+| `webhooks.skip_own_comments` | `true` | Drop review events from `allowed_authors` to prevent Claude reply loops. Set `false` to let Claude react to your own PR comments |
 
 ### Behavior hooks
 
@@ -355,29 +327,12 @@ Each hook has an `instruction` template with `{placeholder}` substitution. Opt-i
 **Notable flags:**
 - `use_agent` — `true` (default) spawns a subagent to fix CI, keeping the main session free. Set `false` to act inline.
 - `upstream_sync` — `true` (default) rebases from main before diagnosing. Set `false` if main is frequently broken.
-- `behavior.worktrees.mode` — `"temp"` (default, shell `git worktree add/remove`) or `"native"` (Claude Code `isolation="worktree"`).
+- `behavior.worktrees.mode` — `"temp"` (default, shell `git worktree add/remove`) or `"native"` (Claude Code `isolation="worktree"`). **Status:** `"temp"` is stable and production-ready. `"native"` is experimental — see [docs/worktree-integration.md](docs/worktree-integration.md) for current limitations.
 - `behavior.worktrees.base_dir` — base directory for temporary worktrees (default `/tmp`). Path: `{base_dir}/{repo}-pr-{N}-rebase`.
 
 > Security alert hooks broadcast to **all sessions** registered for the repo. Enable only on the single instance responsible for security triage to avoid multiple sessions racing on the same CVE.
 
-### Template placeholders
-
-| Placeholder | Available in |
-|---|---|
-| `{repo}` | all hooks |
-| `{branch}` | CI failure hooks, code scanning |
-| `{run_url}`, `{workflow}`, `{status}`, `{commit}` | CI failure hooks |
-| `{use_agent_preamble}` | CI failure hooks (`use_agent` toggle) |
-| `{health_check_step}` | CI failure hooks (`upstream_sync` toggle) |
-| `{pr_number}`, `{pr_title}`, `{pr_url}` | PR state, on_pr_opened, on_pr_approved |
-| `{head_branch}`, `{base_branch}` | PR state, on_pr_opened |
-| `{worktree_steps}` | PR state (auto-generated rebase commands) |
-| `{skill}`, `{worktree_preamble}` | on_pr_review |
-| `{author}` | on_pr_opened |
-| `{reviewer}` | on_pr_approved |
-| `{cve}`, `{package}`, `{patched_version}` | on_dependabot_alert |
-| `{rule}`, `{tool}` | on_code_scanning_alert |
-| `{severity}`, `{alert_url}` | both security hooks |
+Full placeholder reference is in `config.example.yaml` next to each hook.
 
 ---
 
