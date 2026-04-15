@@ -25,9 +25,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -40,6 +40,38 @@ import { createMcpServer, sendChannelNotification, startWebhookServer } from "./
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) => console.error("[github-ci:hub]", ...args);
+
+// ── .env loader ───────────────────────────────────────────────────────────────
+// Bun auto-loads .env only from the working directory. When running the compiled
+// binary from a different directory, env vars may not be set. This function loads
+// .env from next to the config file as a fallback (existing env vars are NOT
+// overwritten, so shell exports always take precedence).
+export function loadDotEnv(configPath: string): void {
+  const envPath = resolve(dirname(configPath), ".env");
+  let content: string;
+  try {
+    content = readFileSync(envPath, "utf8");
+  } catch {
+    return; // .env next to config is optional
+  }
+  let loaded = 0;
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eqIdx = line.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = line.slice(0, eqIdx).trim();
+    if (!key || key in process.env) continue; // never overwrite existing env vars
+    const raw = line.slice(eqIdx + 1).trim();
+    // Strip optional surrounding quotes (single or double)
+    const val = /^(["']).*\1$/.test(raw) ? raw.slice(1, -1) : raw;
+    process.env[key] = val;
+    loaded++;
+  }
+  if (loaded > 0) {
+    log(`Loaded ${loaded} variable(s) from ${envPath}`);
+  }
+}
 
 // ── Module-level mutable state ────────────────────────────────────────────────
 // Declared here so session-factory closures can reference them at call time.
@@ -979,6 +1011,10 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     process.exit(1);
   }
 
+  // Load .env from next to the config file before reading any env vars.
+  // This runs before loadHubConfig so env vars are available for template interpolation.
+  loadDotEnv(configPath);
+
   try {
     const loaded = loadHubConfig(configPath);
     config = loaded.config;
@@ -996,9 +1032,20 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
 
   log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
 
-  // Validate GITHUB_TOKEN at startup
+  // Validate required env vars at startup — fail fast before binding ports.
   {
-    log(`Working directory: ${process.cwd()} (Bun loads .env from here)`);
+    log(`Working directory: ${process.cwd()} (Bun also auto-loads .env from here)`);
+    const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      process.stderr.write(
+        "ERROR: GITHUB_WEBHOOK_SECRET is not set.\n" +
+          `  Put it in a .env file next to ${configPath} or in ${process.cwd()}/.env\n` +
+          "  Alternatively export the variable in the shell before starting the hub.\n",
+      );
+      process.exit(1);
+    }
+    log(`GITHUB_WEBHOOK_SECRET found (${webhookSecret.length} chars)`);
+
     const token = process.env.GITHUB_TOKEN;
     if (!token) {
       log("WARNING: GITHUB_TOKEN is not set. Log fetching and fallback PR comments will not work.");

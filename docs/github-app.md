@@ -90,6 +90,47 @@ To add more repos later: go to the App's installation page and edit the reposito
 
 ---
 
+## 5a. Organization installation — who can do what
+
+GitHub App installation at the org level requires **org owner** privileges. Here is what each role can do:
+
+| Role | Can create the App | Can install at org level | Can install for their own repos |
+|---|---|---|---|
+| Org owner | Yes | Yes | Yes |
+| Org member (non-owner) | Yes (personal account only) | No — must request from owner | Yes (their own personal repos) |
+| External collaborator | Personal account only | No | Only repos they have admin access to |
+
+**If you are not an org owner, you have two options:**
+
+**Option A — Ask your org owner to install (covers all org repos):**
+1. Share the App ID with your org owner (visible on the App's settings page under "About").
+2. Org owner goes to `github.com/organizations/<your-org>/settings/installations`.
+3. Owner finds the App → clicks **Install** → selects **All repositories** (or specific repos) → **Install**.
+
+**Option B — Install under your personal account (covers only your personal repos):**
+1. Go to `github.com/settings/installations` (your personal settings, not org settings).
+2. Find the App → **Install** → select **Only select repositories** → pick your repos → **Install**.
+
+> **Important:** A personal account installation cannot receive events from org-owned repositories. Events from org repos only flow when the App is installed at the org level by an org owner.
+
+---
+
+## 5b. Accepting updated permissions
+
+When you update a GitHub App's permissions after initial installation (e.g. adding Code scanning alerts later), **each existing installation must separately accept the updated permissions** before the new event types start flowing.
+
+**What happens:**
+1. You update the App's permissions in the App settings.
+2. GitHub emails the org owner (and the personal account owner for personal installs) with subject: *"Review permissions for [App name]"*.
+3. The owner clicks the link in the email, or goes to:
+   - Org installs: `github.com/organizations/<org>/settings/installations` → click the App → **Review and accept**
+   - Personal installs: `github.com/settings/installations` → click the App → **Review and accept**
+4. Until the owner accepts, the App continues using its **old** permissions — new event types are not delivered.
+
+> **For developers (non-owners):** If you added a new event type and events stop arriving after the App permission update, ask your org owner to check their email for a pending permissions review from GitHub.
+
+---
+
 ## 6. Configure claude-beacon
 
 The configuration is the same as the per-repo webhook setup. The webhook secret you generated in step 1 becomes `GITHUB_WEBHOOK_SECRET`:
@@ -151,5 +192,5 @@ Check the App's **Advanced → Recent Deliveries** tab (in App settings, not rep
 **installation / installation_repositories events**  
 When you install or update the app, GitHub sends these events. claude-beacon logs them as `[skip] event=installation: not handled` and ignores them — this is expected.
 
-**Permissions not showing up**  
-After changing App permissions, each installation needs to accept the updated permissions. GitHub sends a notification to the org admin with an Accept link.
+**Permission updates not taking effect after changing App settings**  
+After adding new permissions or event subscriptions to the App, GitHub requires each installation to accept the updated permissions before new events are delivered. The org owner (or personal account owner) receives an email from GitHub — they must click **Review and accept** at the installation page. See [§5b. Accepting updated permissions](#5b-accepting-updated-permissions) for the full procedure.

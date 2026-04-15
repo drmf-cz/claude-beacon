@@ -1,10 +1,10 @@
-import { describe, expect, it } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HubUserProfile } from "../config.js";
 import { loadHubConfig } from "../config.js";
-import { bearerAuth, FallbackWorker, selectHubRecipients } from "../hub.js";
+import { bearerAuth, FallbackWorker, loadDotEnv, selectHubRecipients } from "../hub.js";
 import type { RoutingKey } from "../server.js";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
@@ -64,6 +64,120 @@ describe("bearerAuth", () => {
     });
     const result = bearerAuth(req, TOKEN_MAP);
     expect(result).toEqual(ALICE);
+  });
+
+  it("returns null for an empty token ('Bearer ' with only trailing space)", () => {
+    const req = new Request("http://localhost/mcp", {
+      headers: { Authorization: "Bearer " },
+    });
+    // (.+) requires at least one char after whitespace; a single trailing space
+    // makes (.+) capture " " which is not in TOKEN_MAP → null
+    expect(bearerAuth(req, TOKEN_MAP)).toBeNull();
+  });
+
+  it("accepts a valid token when Authorization has leading whitespace (HTTP trims header values)", () => {
+    const req = new Request("http://localhost/mcp", {
+      headers: { Authorization: `  Bearer ${ALICE.token}` },
+    });
+    // The Fetch API trims header values before storage, so "  Bearer <tok>" becomes
+    // "Bearer <tok>" — regex matches and token is found in TOKEN_MAP
+    expect(bearerAuth(req, TOKEN_MAP)).toEqual(ALICE);
+  });
+
+  it("accepts a valid token when double-space follows Bearer (\\s+ is greedy)", () => {
+    const req = new Request("http://localhost/mcp", {
+      headers: { Authorization: `Bearer  ${ALICE.token}` },
+    });
+    // \\s+ is greedy and consumes both spaces; (.+) captures the token correctly
+    expect(bearerAuth(req, TOKEN_MAP)).toEqual(ALICE);
+  });
+
+  it("returns null for a non-Bearer scheme (e.g. Basic auth)", () => {
+    const req = new Request("http://localhost/mcp", {
+      headers: { Authorization: `Basic ${ALICE.token}` },
+    });
+    expect(bearerAuth(req, TOKEN_MAP)).toBeNull();
+  });
+});
+
+// ── loadDotEnv ────────────────────────────────────────────────────────────────
+
+describe("loadDotEnv", () => {
+  // Test-specific env keys — cleaned up in afterEach
+  const TEST_KEYS = [
+    "DOTENV_TEST_PLAIN",
+    "DOTENV_TEST_DQUOTE",
+    "DOTENV_TEST_SQUOTE",
+    "DOTENV_TEST_COMMENT",
+    "DOTENV_TEST_MALFORMED",
+    "DOTENV_TEST_MULTI",
+  ] as const;
+
+  function writeTempConfig(envContent: string): string {
+    const dir = join(tmpdir(), `dotenv-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    // loadDotEnv resolves .env relative to dirname(configPath)
+    const cfgPath = join(dir, "hub-config.yaml");
+    writeFileSync(cfgPath, "hub:\n  users: []\n", "utf8");
+    writeFileSync(join(dir, ".env"), envContent, "utf8");
+    return cfgPath;
+  }
+
+  afterEach(() => {
+    for (const key of TEST_KEYS) {
+      delete process.env[key];
+    }
+  });
+
+  it("loads a variable that is not already set in the environment", () => {
+    delete process.env["DOTENV_TEST_PLAIN"];
+    const cfg = writeTempConfig("DOTENV_TEST_PLAIN=hello\n");
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("hello");
+  });
+
+  it("does NOT overwrite an existing env var (shell exports take precedence)", () => {
+    process.env["DOTENV_TEST_PLAIN"] = "original";
+    const cfg = writeTempConfig("DOTENV_TEST_PLAIN=should-not-win\n");
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("original");
+  });
+
+  it("strips surrounding double quotes from values", () => {
+    delete process.env["DOTENV_TEST_DQUOTE"];
+    const cfg = writeTempConfig('DOTENV_TEST_DQUOTE="hello world"\n');
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_DQUOTE"]).toBe("hello world");
+  });
+
+  it("strips surrounding single quotes from values", () => {
+    delete process.env["DOTENV_TEST_SQUOTE"];
+    const cfg = writeTempConfig("DOTENV_TEST_SQUOTE='hello world'\n");
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_SQUOTE"]).toBe("hello world");
+  });
+
+  it("skips comment lines and blank lines", () => {
+    delete process.env["DOTENV_TEST_COMMENT"];
+    const cfg = writeTempConfig(
+      "# this is a comment\n\nDOTENV_TEST_COMMENT=value\n# another comment\n",
+    );
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_COMMENT"]).toBe("value");
+  });
+
+  it("skips malformed lines that have no equals sign", () => {
+    delete process.env["DOTENV_TEST_MALFORMED"];
+    delete process.env["DOTENV_TEST_PLAIN"];
+    const cfg = writeTempConfig("DOTENV_TEST_MALFORMED\nDOTENV_TEST_PLAIN=ok\n");
+    loadDotEnv(cfg);
+    expect(process.env["DOTENV_TEST_MALFORMED"]).toBeUndefined();
+    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("ok");
+  });
+
+  it("does not throw when the .env file does not exist next to the config", () => {
+    const cfgPath = join(tmpdir(), `no-such-dir-${Date.now()}`, "hub-config.yaml");
+    expect(() => loadDotEnv(cfgPath)).not.toThrow();
   });
 });
 

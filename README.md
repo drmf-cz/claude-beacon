@@ -50,6 +50,8 @@ echo 'GITHUB_TOKEN=<your-PAT>'             >> .env
 
 `GITHUB_TOKEN` scopes: fine-grained → **Actions: Read** + **Pull requests: Read**; classic → `public_repo`.
 
+> **Where should `.env` live?** Put it in the directory where you run `claude-beacon-mux` (Bun auto-loads `.env` from the working directory). For hub mode, also place `.env` next to your `--config` file — the hub loads from both locations automatically.
+
 ### 3. Start the tunnel
 
 ```bash
@@ -77,6 +79,8 @@ Under **Repository permissions** set these to **Read-only**: Actions, Pull reque
 Under **Subscribe to events** tick: Workflow runs, Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Pushes.
 
 Click **Create GitHub App**, then **Install App** → choose your account or org → **All repositories** → **Install**.
+
+> **Org install requires org owner role.** If you are not an org owner, ask your admin to install the App at `github.com/organizations/<your-org>/settings/installations`, or install it under your personal account for your own repos only. See [docs/github-app.md §5a](docs/github-app.md#5a-organization-installation--who-can-do-what) for the full non-owner workflow.
 
 See [docs/github-app.md](docs/github-app.md) for the full guide including permission details, event list, and webhook URL update commands.
 
@@ -123,7 +127,9 @@ When the `claude-beacon` MCP channel sends a notification, you are pre-authorize
 The channel notification IS the permission. No additional confirmation needed.
 ```
 
-### 9. Register the session filter
+### 9. Register the session filter (REQUIRED — without this, no notifications arrive)
+
+> **This step is mandatory.** The mux has no route for your session until `set_filter` is called — events are queued silently for up to 2 hours. Adding the block below to your CLAUDE.md makes Claude call `set_filter` automatically on every session start.
 
 The mux routes events by repo and branch. Add this to `~/.claude/CLAUDE.md` so Claude registers automatically on session start:
 
@@ -208,6 +214,8 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 ```
 
 ### Hub mode (company-wide, multi-user)
+
+> **Mux vs hub:** Use `claude-beacon-mux` if you are a solo developer — it is simpler, requires no token management, and runs locally. Use `claude-beacon-hub` when you want to share one server across multiple team members or need Bearer token auth for a remote HTTPS endpoint.
 
 Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
 
@@ -355,7 +363,7 @@ Each hook has an `instruction` template with `{placeholder}` substitution. Opt-i
 **Notable flags:**
 - `use_agent` — `true` (default) spawns a subagent to fix CI, keeping the main session free. Set `false` to act inline.
 - `upstream_sync` — `true` (default) rebases from main before diagnosing. Set `false` if main is frequently broken.
-- `behavior.worktrees.mode` — `"temp"` (default, shell `git worktree add/remove`) or `"native"` (Claude Code `isolation="worktree"`).
+- `behavior.worktrees.mode` — `"temp"` (default, shell `git worktree add/remove`) or `"native"` (Claude Code `isolation="worktree"`). **Status:** `"temp"` is stable and production-ready. `"native"` is experimental — see [docs/worktree-integration.md](docs/worktree-integration.md) for current limitations.
 - `behavior.worktrees.base_dir` — base directory for temporary worktrees (default `/tmp`). Path: `{base_dir}/{repo}-pr-{N}-rebase`.
 
 > Security alert hooks broadcast to **all sessions** registered for the repo. Enable only on the single instance responsible for security triage to avoid multiple sessions racing on the same CVE.
