@@ -29,7 +29,7 @@ Built on the [Claude Code Channels API](https://docs.anthropic.com/en/docs/claud
 
 ## Quickstart
 
-The fastest path is **mux mode** with a **GitHub App**: one App installation covers your entire org, and one persistent mux process handles all Claude Code sessions.
+The recommended path is **hub mode** with a **GitHub App**: one App installation covers your entire org, and one persistent hub process routes events to your Claude Code sessions with Bearer token authentication.
 
 **Requirements:** [Bun](https://bun.sh) ≥ 1.1.0 · Claude Code ≥ 2.1.80 · [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or [ngrok](https://ngrok.com)
 
@@ -50,7 +50,7 @@ echo 'GITHUB_TOKEN=<your-PAT>'             >> .env
 
 `GITHUB_TOKEN` scopes: fine-grained → **Actions: Read** + **Pull requests: Read**; classic → `public_repo`.
 
-> **Where should `.env` live?** Put it in the directory where you run `claude-beacon-mux` (Bun auto-loads `.env` from the working directory). For hub mode, also place `.env` next to your `--config` file — the hub loads from both locations automatically.
+> **Where should `.env` live?** Put it in the directory where you run `claude-beacon-hub` (Bun auto-loads `.env` from the working directory). For advanced YAML config mode, you can also place `.env` next to the `--config` file — the hub loads from both locations.
 
 ### 3. Start the tunnel
 
@@ -86,21 +86,26 @@ See [docs/github-app.md](docs/github-app.md) for the full guide including permis
 
 > **Single-repo alternative:** If you only need one repository, skip the GitHub App and [register a webhook directly in that repo](#per-repo-webhook-single-repository) instead.
 
-### 5. Start the mux
+### 5. Start the hub
 
 ```bash
-claude-beacon-mux --author YourGitHubUsername
+claude-beacon-hub --author YourGitHubUsername
 ```
 
-> **`--author` is required.** The server refuses to start without it — it prevents Claude from acting on other people's PRs. See [`allowed_authors`](#allowed_authors-required).
+> **`--author` is required.** The server refuses to start without it — it sets the GitHub identity events are routed to. Hub prints the exact `claude mcp add` command on startup — copy it.
 
 Keep this running in a tmux pane or background terminal. See [docs/multi-session.md](docs/multi-session.md) for systemd setup.
 
-### 6. Connect Claude Code to the mux
+### 6. Connect Claude Code
+
+Run the command printed by the hub on startup:
 
 ```bash
-claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp
+claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp \
+  --header "Authorization: Bearer <token>"
 ```
+
+The token is derived from your webhook secret — it stays the same across restarts, so this command only needs to be run once.
 
 ### 7. Start Claude Code
 
@@ -129,9 +134,9 @@ The channel notification IS the permission. No additional confirmation needed.
 
 ### 9. Register the session filter (REQUIRED — without this, no notifications arrive)
 
-> **This step is mandatory.** The mux has no route for your session until `set_filter` is called — events are queued silently for up to 2 hours. Adding the block below to your CLAUDE.md makes Claude call `set_filter` automatically on every session start.
+> **This step is mandatory.** The hub has no route for your session until `set_filter` is called — events are queued silently for up to 2 hours. Adding the block below to your CLAUDE.md makes Claude call `set_filter` automatically on every session start.
 
-The mux routes events by repo and branch. Add this to `~/.claude/CLAUDE.md` so Claude registers automatically on session start:
+The hub routes events by repo and branch. Add this to `~/.claude/CLAUDE.md` so Claude registers automatically on session start:
 
 ```markdown
 ## GitHub CI Channel — session filter
@@ -176,72 +181,15 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 }
 ```
 
-### Hub mode (company-wide, multi-user)
+### Scaling to a team
 
-> **Mux vs hub:** Use `claude-beacon-mux` if you are a solo developer — it is simpler, requires no token management, and runs locally. Use `claude-beacon-hub` when you want to share one server across multiple team members or need Bearer token auth for a remote HTTPS endpoint.
+The Quickstart's `--author` flag is a single-user shortcut. To share one hub instance across multiple teammates, switch to a YAML config with one entry per user — each gets their own Bearer token and can have per-user behavior overrides. See [docs/hub-mode.md](docs/hub-mode.md) for the full setup guide including team config, reverse proxy (TLS), systemd, fallback worker, and daemon sessions.
 
-Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
+### Mux (no Bearer auth, local only)
 
-**No `--author` flag** — in hub mode your GitHub identity comes from your Bearer token, not a CLI flag.
+The predecessor to hub — runs without Bearer tokens, so any process on localhost can connect to `:9444`. Suitable for air-gapped setups or if you prefer not to manage tokens.
 
-#### Minimal single-user setup
-
-Good for a single developer who wants Bearer token auth (or plans to add teammates later):
-
-**1. Generate a token and create a minimal config:**
-
-```bash
-bun add -g claude-beacon
-TOKEN=$(openssl rand -hex 32)
-echo "Your token: $TOKEN"
-
-cat > hub-config.yaml << EOF
-hub:
-  users:
-    - github_username: YourGitHubUsername
-      token: "$TOKEN"
-EOF
-```
-
-**2. Start the hub** (same machine as Claude Code — no reverse proxy needed):
-
-```bash
-GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
-  claude-beacon-hub --config hub-config.yaml
-```
-
-**3. Update your MCP config** (replaces the old `claude mcp add` command from mux mode):
-
-```bash
-# Remove old mux entry if present
-claude mcp remove claude-beacon
-
-# Add hub entry with your Bearer token
-claude mcp add --transport http claude-beacon http://127.0.0.1:9444/mcp \
-  --header "Authorization: Bearer $TOKEN"
-```
-
-Or edit `~/.mcp.json` directly:
-
-```json
-{
-  "mcpServers": {
-    "claude-beacon": {
-      "url": "http://127.0.0.1:9444/mcp",
-      "type": "http",
-      "headers": { "Authorization": "Bearer <your-token>" }
-    }
-  }
-}
-```
-
-**4. Start Claude Code and register the session filter** — same as the Quickstart (steps 7–9).
-
-The hub confirms: `Filter registered for @YourGitHubUsername: owner/repo@feat/branch.`
-
-#### Team / company setup
-
-For a shared instance accessible to the whole org, add a reverse proxy (nginx or Caddy) for TLS and point the `url` at your HTTPS endpoint. Each teammate gets their own token entry in `hub:users`. See [docs/hub-mode.md](docs/hub-mode.md) for the full setup guide including reverse proxy config, systemd, fallback worker, and daemon sessions.
+See [docs/mux-mode.md](docs/mux-mode.md) for setup.
 
 ---
 
@@ -269,21 +217,7 @@ All settings are optional — the defaults work for most setups. Pass a YAML fil
 
 ```bash
 cp config.example.yaml my-config.yaml   # start from the annotated template
-claude-beacon-mux --author YourGitHubUsername --config my-config.yaml
-```
-
-### `allowed_authors` (required) {#allowed_authors-required}
-
-claude-beacon refuses to start without at least one entry. Two kinds:
-
-- **Username** (no `@`) — matched against `pr.user.login`, the PR author's GitHub handle.
-- **Email** (contains `@`) — matched against `Co-Authored-By` commit trailers. Use when an AI agent (Devin, etc.) creates the PR on your behalf.
-
-```yaml
-webhooks:
-  allowed_authors:
-    - YourGitHubUsername
-    - you@company.com   # for AI-agent co-authored PRs
+claude-beacon-hub --author YourGitHubUsername --config my-config.yaml
 ```
 
 ### Server options
@@ -301,7 +235,7 @@ webhooks:
 
 | Key | Default | Description |
 |---|---|---|
-| `webhooks.allowed_authors` | **required** | GitHub usernames and/or emails whose PRs trigger actions |
+| `webhooks.allowed_authors` | **required** | GitHub usernames and/or emails whose PRs trigger actions. In hub `--author` mode this is set automatically; explicit YAML config is needed for mux or multi-user hub setups. Email entries match `Co-Authored-By` trailers (useful when an AI agent authors PRs on your behalf). |
 | `webhooks.allowed_events` | `[]` (all) | Allowlist of GitHub event types. Empty = accept all |
 | `webhooks.allowed_repos` | `[]` (all) | Allowlist of repos as `"owner/repo"`. Empty = accept all |
 | `webhooks.skip_own_comments` | `true` | Drop review events from `allowed_authors` to prevent Claude reply loops. Set `false` to let Claude react to your own PR comments |
@@ -347,8 +281,8 @@ Secret mismatch. Check `GITHUB_WEBHOOK_SECRET` in `.mcp.json` exactly matches Gi
 **No notification when a PR falls behind**  
 Ensure **Pushes** is ticked in GitHub webhook events and `GITHUB_TOKEN` is set. Note: only pushes to main/master trigger PR checks, not pushes to feature branches.
 
-**Mux sends to too many sessions**  
-Stale sessions auto-expire after 30 minutes of inactivity. Restart the mux to clear them immediately.
+**Hub/mux sends to too many sessions**  
+Stale sessions auto-expire after 30 minutes of inactivity. Restart the hub to clear them immediately.
 
 **"bun: command not found" in MCP logs**  
 Use the absolute path in `.mcp.json`: `"command": "/home/you/.bun/bin/bun"`. Find with `which bun`.
@@ -365,10 +299,10 @@ The CLAUDE.md permissions block is missing — add it as described in [Quickstar
 3. All required event types subscribed in App settings?
 4. `--author` exactly matches the GitHub login of the PR author (case-sensitive).
 5. Claude Code started with `--dangerously-load-development-channels server:claude-beacon`.
-6. In mux mode: `set_filter` called in the session?
+6. `set_filter` called in the session?
 
 **GITHUB_TOKEN 401 on startup**  
-The mux loads `.env` from its working directory, not your home directory. Confirm via the CWD log line at startup. For fine-grained tokens: resource owner must be the org, and the org must have approved the token.
+The hub loads `.env` from its working directory, not your home directory. Confirm via the CWD log line at startup. For fine-grained tokens: resource owner must be the org, and the org must have approved the token.
 
 ---
 

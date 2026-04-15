@@ -1,6 +1,6 @@
 {
   "name": "claude-beacon",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "Claude Code MCP channel plugin — pushes GitHub Actions CI/CD results into running Claude Code sessions",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "start:mux": "bun run src/mux.ts",
-    "start:hub": "bun run src/hub.ts --config hub-config.yaml",
+    "start:hub": "bun run src/hub.ts --author YourGitHubUsername",
     "build": "bun run scripts/build.ts",
     "prepublishOnly": "bun test && bun run build",
     "typecheck": "tsc --noEmit",

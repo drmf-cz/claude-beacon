@@ -24,7 +24,7 @@
  *   MCP_PORT               optional  MCP HTTP port (default: 9444)
  */
 
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -1015,34 +1015,27 @@ if (import.meta.main) {
   const cliArgs = process.argv.slice(2);
 
   if (cliArgs.includes("--help") || cliArgs.includes("-h")) {
-    process.stdout.write(`claude-beacon-hub — Company-wide multi-user hub server
+    process.stdout.write(`claude-beacon-hub — Hub server for GitHub CI/PR notifications
 
-Usage:
+Usage (solo developer):
+  claude-beacon-hub --author <GitHubUsername>
+
+Usage (team / advanced):
   claude-beacon-hub --config <path/to/hub-config.yaml>
 
-Required:
-  --config <path>   YAML config file with a 'hub:' section (see config.example.yaml)
+Options:
+  --author <login>  Single-user mode. Derives a stable Bearer token from
+                    GITHUB_WEBHOOK_SECRET. Token is printed on startup.
+  --config <path>   YAML config with 'hub:' section (multiple users, fallback
+                    worker, per-user behavior). See config.example.yaml.
+  --help, -h        Show this message.
 
-Environment variables (put in .env):
-  GITHUB_WEBHOOK_SECRET   HMAC-SHA256 secret matching your GitHub App webhook
+Environment variables (put in .env next to config or in CWD):
+  GITHUB_WEBHOOK_SECRET   HMAC-SHA256 secret matching your GitHub App webhook (required)
   GITHUB_TOKEN            PAT with Actions:Read + Pull requests:Read
-  ANTHROPIC_API_KEY       Required when any user has fallback.enabled: true
+  ANTHROPIC_API_KEY       Required when fallback.enabled: true
   WEBHOOK_PORT            Webhook receiver port (default: 9443)
   MCP_PORT                MCP HTTP port (default: 9444)
-
-User onboarding (admin generates tokens; each user adds to their ~/.mcp.json):
-  {
-    "mcpServers": {
-      "claude-beacon": {
-        "url": "https://beacon.company.com/mcp",
-        "type": "http",
-        "headers": { "Authorization": "Bearer <their-token>" }
-      }
-    }
-  }
-
-Then: claude --dangerously-load-development-channels server:claude-beacon
-And call set_filter once per session (same as mux mode).
 
 Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n`);
     process.exit(0);
@@ -1051,44 +1044,95 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
   const configIdx = cliArgs.indexOf("--config");
   const configPath = configIdx !== -1 ? (cliArgs[configIdx + 1] ?? null) : null;
 
-  if (!configPath) {
+  const authorIdx = cliArgs.indexOf("--author");
+  const authorArg = authorIdx !== -1 ? (cliArgs[authorIdx + 1] ?? null) : null;
+
+  if (!configPath && !authorArg) {
     process.stderr.write(
-      "ERROR: --config <path> is required for claude-beacon-hub.\n" +
+      "ERROR: either --author <GitHubUsername> or --config <path> is required.\n" +
         "Run with --help for usage.\n",
     );
     process.exit(1);
   }
 
-  // Load .env from next to the config file before reading any env vars.
-  // This runs before loadHubConfig so env vars are available for template interpolation.
-  loadDotEnv(configPath);
-
-  try {
-    const loaded = loadHubConfig(configPath);
-    config = loaded.config;
-    hubConfig = loaded.hub;
-    log(`Loaded hub config from ${configPath}: ${hubConfig.users.length} user(s)`);
-  } catch (err) {
-    process.stderr.write(`ERROR: Failed to load config: ${err}\n`);
+  if (configPath && authorArg) {
+    process.stderr.write("ERROR: --author and --config are mutually exclusive.\n");
     process.exit(1);
   }
 
-  // Build token → profile lookup map
-  tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
-  // Hub derives allowed_authors from registered users (no --author flag)
-  config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
+  if (configPath) {
+    // ── YAML config mode (team / advanced) ──────────────────────────────────
+    // Load .env from next to the config file before reading any env vars.
+    loadDotEnv(configPath);
 
-  log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
+    try {
+      const loaded = loadHubConfig(configPath);
+      config = loaded.config;
+      hubConfig = loaded.hub;
+      log(`Loaded hub config from ${configPath}: ${hubConfig.users.length} user(s)`);
+    } catch (err) {
+      process.stderr.write(`ERROR: Failed to load config: ${err}\n`);
+      process.exit(1);
+    }
 
-  // Validate required env vars at startup — fail fast before binding ports.
+    tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
+    config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
+    log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
+  } else {
+    // ── Single-user --author mode ────────────────────────────────────────────
+    // Load .env from CWD (no config file path to derive from).
+    loadDotEnv(join(process.cwd(), ".env"));
+
+    const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      process.stderr.write(
+        "ERROR: GITHUB_WEBHOOK_SECRET is not set.\n" +
+          `  Put it in ${process.cwd()}/.env or export it before starting.\n`,
+      );
+      process.exit(1);
+    }
+
+    // Derive a stable Bearer token from the webhook secret + username.
+    // Token changes only when the webhook secret is rotated.
+    const bearerToken = createHmac("sha256", webhookSecret)
+      .update(`hub-token:${authorArg}`)
+      .digest("hex");
+
+    const profile: HubUserProfile = { github_username: authorArg as string, token: bearerToken };
+    hubConfig = {
+      users: [profile],
+      fallback: {
+        enabled: false,
+        timeout_ms: 900_000,
+        model: "claude-sonnet-4-6",
+        notify_via_pr_comment: true,
+      },
+    };
+    config = { ...DEFAULT_CONFIG };
+    config.webhooks.allowed_authors = [authorArg as string];
+    tokenMap = new Map([[bearerToken, profile]]);
+
+    const mcpPort = Number(process.env.MCP_PORT ?? 9444);
+    process.stderr.write(
+      "\n──────────────────────────────────────────────────────────────\n" +
+        `Hub running in single-user mode for @${authorArg}\n\n` +
+        "Run this once to connect Claude Code:\n\n" +
+        `  claude mcp remove claude-beacon 2>/dev/null; \\\n` +
+        `  claude mcp add --transport http claude-beacon http://127.0.0.1:${mcpPort}/mcp \\\n` +
+        `    --header "Authorization: Bearer ${bearerToken}"\n\n` +
+        "To scale to a team, switch to --config. See docs/hub-mode.md\n" +
+        "──────────────────────────────────────────────────────────────\n\n",
+    );
+  }
+
+  // ── Shared startup (both modes) ───────────────────────────────────────────
   {
     log(`Working directory: ${process.cwd()} (Bun also auto-loads .env from here)`);
     const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
     if (!webhookSecret) {
       process.stderr.write(
         "ERROR: GITHUB_WEBHOOK_SECRET is not set.\n" +
-          `  Put it in a .env file next to ${configPath} or in ${process.cwd()}/.env\n` +
-          "  Alternatively export the variable in the shell before starting the hub.\n",
+          "  Put it in .env or export it before starting.\n",
       );
       process.exit(1);
     }

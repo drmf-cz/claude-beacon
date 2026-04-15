@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.3] — 2026-04-15
+
+### Features
+- **Hub `--author` mode**: `claude-beacon-hub --author YourGitHubUsername` now works without a YAML config file. Hub derives a stable Bearer token from `GITHUB_WEBHOOK_SECRET` via HMAC-SHA256 (`hmac(secret, "hub-token:<username>")`), prints the exact `claude mcp add --header "Authorization: Bearer <token>"` command on startup, and builds an in-memory single-user config. Token is deterministic across restarts — Claude Code only needs to be reconfigured when the webhook secret is rotated.
+- **Hub as default Quickstart path**: README Quickstart now uses `claude-beacon-hub --author` (steps 5–6) instead of mux. Hub provides Bearer token auth, per-user/per-session behavior config, fallback worker, and scales to teams without reconfiguration.
+- **Mux documentation extracted**: Full mux setup (start command, connect Claude Code, `allowed_authors` config) moved to `docs/mux-mode.md`. README "Other deployment modes" links there.
+
+### Documentation
+- README Quickstart: replace mux steps 5–6 with hub `--author` steps; update `.env` location note
+- README Other deployment modes: replace full hub setup subsections with "Scaling to a team" callout + link to `docs/hub-mode.md`; replace mux subsection with one-liner + link to `docs/mux-mode.md`; remove standalone `allowed_authors` section (now a config table row)
+- `package.json`: `start:hub` script updated to `--author YourGitHubUsername` example
+
 ## [1.8.2] — 2026-04-15
 
 ### Bug fixes
