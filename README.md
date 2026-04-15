@@ -211,25 +211,53 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 
 Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
 
-**Admin setup** (one time):
+**No `--author` flag** — in hub mode your GitHub identity comes from your Bearer token, not a CLI flag.
+
+#### Minimal single-user setup
+
+Good for a single developer who wants Bearer token auth (or plans to add teammates later):
+
+**1. Generate a token and create a minimal config:**
 
 ```bash
-# 1. Add hub: section to config (see config.example.yaml)
-#    Generate tokens: openssl rand -hex 32
+bun add -g claude-beacon
+TOKEN=$(openssl rand -hex 32)
+echo "Your token: $TOKEN"
 
-# 2. Start the hub (--config is required)
+cat > hub-config.yaml << EOF
+hub:
+  users:
+    - github_username: YourGitHubUsername
+      token: "$TOKEN"
+EOF
+```
+
+**2. Start the hub** (same machine as Claude Code — no reverse proxy needed):
+
+```bash
 GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
   claude-beacon-hub --config hub-config.yaml
 ```
 
-**Developer setup** (each team member):
+**3. Update your MCP config** (replaces the old `claude mcp add` command from mux mode):
+
+```bash
+# Remove old mux entry if present
+claude mcp remove claude-beacon
+
+# Add hub entry with your Bearer token
+claude mcp add --transport http \
+  --header "Authorization: Bearer $TOKEN" \
+  claude-beacon http://127.0.0.1:9444/mcp
+```
+
+Or edit `~/.mcp.json` directly:
 
 ```json
-// ~/.mcp.json — add the hub as an MCP server with your personal token
 {
   "mcpServers": {
     "claude-beacon": {
-      "url": "https://beacon.company.com/mcp",
+      "url": "http://127.0.0.1:9444/mcp",
       "type": "http",
       "headers": { "Authorization": "Bearer <your-token>" }
     }
@@ -237,9 +265,13 @@ GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
 }
 ```
 
-Then connect and register your session filter exactly as in the Quickstart (steps 8–9). The hub routes CI/PR events to your sessions based on your GitHub username, which is derived from your Bearer token — no `--author` flag needed.
+**4. Start Claude Code and register the session filter** — same as the Quickstart (steps 7–9).
 
-See [docs/hub-mode.md](docs/hub-mode.md) for full setup including reverse proxy, systemd, fallback worker, and daemon sessions.
+The hub confirms: `Filter registered for @YourGitHubUsername: owner/repo@feat/branch.`
+
+#### Team / company setup
+
+For a shared instance accessible to the whole org, add a reverse proxy (nginx or Caddy) for TLS and point the `url` at your HTTPS endpoint. Each teammate gets their own token entry in `hub:users`. See [docs/hub-mode.md](docs/hub-mode.md) for the full setup guide including reverse proxy config, systemd, fallback worker, and daemon sessions.
 
 ---
 

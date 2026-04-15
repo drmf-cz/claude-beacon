@@ -186,9 +186,22 @@ journalctl --user -u claude-beacon-hub -f
 
 ## User onboarding
 
-Admins share each user's token out-of-band. Each developer adds the hub to their Claude Code MCP config:
+Admins share each user's token out-of-band. Each developer registers the hub as their MCP server.
 
-**`~/.mcp.json`:**
+**Option A — CLI (recommended):**
+
+```bash
+# Remove any existing mux entry first
+claude mcp remove claude-beacon
+
+# Add the hub with your Bearer token
+claude mcp add --transport http \
+  --header "Authorization: Bearer <your-token>" \
+  claude-beacon https://beacon.company.com/mcp
+```
+
+**Option B — edit `~/.mcp.json` directly:**
+
 ```json
 {
   "mcpServers": {
