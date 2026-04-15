@@ -34,8 +34,22 @@ Alice  Bob  Carol  …
 ## Prerequisites
 
 - All requirements from the [main Quickstart](../README.md#quickstart) (Bun, Claude Code ≥ 2.1.80, GitHub App)
-- `ANTHROPIC_API_KEY` — if any user enables `fallback.enabled: true`
 - A reverse proxy (nginx or Caddy) for HTTPS termination
+
+**Environment variables:**
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GITHUB_WEBHOOK_SECRET` | Yes | HMAC secret matching your GitHub App webhook |
+| `GITHUB_TOKEN` | Yes | PAT with Actions:Read + Pull requests:Read (log fetching, PR comments) |
+| `ANTHROPIC_API_KEY` | Only if fallback enabled | Hub-wide fallback key; can be omitted when every enabled user sets `fallback.anthropic_api_key` |
+| `WEBHOOK_PORT` | No | Webhook receiver port (default: 9443) |
+| `MCP_PORT` | No | MCP HTTP server port exposed to developers (default: 9444) |
+
+**If a token is missing or invalid:**
+- Sessions with no `Authorization` header or an unrecognised Bearer token receive a `401` — no session is created, no work runs
+- If `GITHUB_TOKEN` is unset, log fetching and PR comment posting are silently skipped; the hub keeps routing normally
+- If `ANTHROPIC_API_KEY` is unset and no per-user `fallback.anthropic_api_key` is configured, the fallback worker is silently disabled for that user; a warning is logged at startup
 
 ---
 
@@ -76,15 +90,28 @@ Generate tokens: `openssl rand -hex 32`
 
 ### 2. Start the hub
 
+`--config` is required. Create a `.env` file in the working directory (Bun loads it automatically):
+
 ```bash
-GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> ANTHROPIC_API_KEY=<key> \
-  claude-beacon-hub --config hub-config.yaml
+# .env
+GITHUB_WEBHOOK_SECRET=<secret>
+GITHUB_TOKEN=<pat>
+ANTHROPIC_API_KEY=<key>       # optional — only needed if fallback is enabled
+# WEBHOOK_PORT=9443            # optional — default 9443
+# MCP_PORT=9444                # optional — default 9444
 ```
 
-Or with a `.env` file (Bun auto-loads it from the working directory):
+Then start:
 
 ```bash
 claude-beacon-hub --config hub-config.yaml
+```
+
+Or pass env vars inline:
+
+```bash
+GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
+  claude-beacon-hub --config hub-config.yaml
 ```
 
 Output on startup:

@@ -211,7 +211,35 @@ Trade-offs: ~30–60 s latency · `WorkflowRunEvent` only (no PR or job events) 
 
 Run a single `claude-beacon-hub` instance shared across a whole team or org. Each developer connects their Claude Code sessions with a personal Bearer token; events are routed by PR author to the right person's sessions. If a user's sessions are offline, an Anthropic SDK fallback worker handles the work and posts a summary to the PR.
 
-See [docs/hub-mode.md](docs/hub-mode.md) for setup.
+**Admin setup** (one time):
+
+```bash
+# 1. Add hub: section to config (see config.example.yaml)
+#    Generate tokens: openssl rand -hex 32
+
+# 2. Start the hub (--config is required)
+GITHUB_WEBHOOK_SECRET=<secret> GITHUB_TOKEN=<pat> \
+  claude-beacon-hub --config hub-config.yaml
+```
+
+**Developer setup** (each team member):
+
+```json
+// ~/.mcp.json — add the hub as an MCP server with your personal token
+{
+  "mcpServers": {
+    "claude-beacon": {
+      "url": "https://beacon.company.com/mcp",
+      "type": "http",
+      "headers": { "Authorization": "Bearer <your-token>" }
+    }
+  }
+}
+```
+
+Then connect and register your session filter exactly as in the Quickstart (steps 8–9). The hub routes CI/PR events to your sessions based on your GitHub username, which is derived from your Bearer token — no `--author` flag needed.
+
+See [docs/hub-mode.md](docs/hub-mode.md) for full setup including reverse proxy, systemd, fallback worker, and daemon sessions.
 
 ---
 

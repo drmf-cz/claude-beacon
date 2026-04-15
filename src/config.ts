@@ -610,6 +610,12 @@ export function loadHubConfig(filePath: string): { config: Config; hub: HubConfi
     if (typeof user.token !== "string" || user.token === "") {
       throw new Error(`hub.users[${i}].token must be a non-empty string`);
     }
+    if (user.token.length < 16) {
+      throw new Error(
+        `hub.users[${i}].token is too short (${user.token.length} chars, minimum 16). ` +
+          "Generate a secure token with: openssl rand -hex 32",
+      );
+    }
     const skills = user.skills as HubSkillMap | undefined;
     const fallback = user.fallback as HubUserFallback | undefined;
     return {

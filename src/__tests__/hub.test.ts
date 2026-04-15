@@ -16,7 +16,7 @@ const ALICE: HubUserProfile = {
 
 const BOB: HubUserProfile = {
   github_username: "bob",
-  token: "tok_bob_def456",
+  token: "tok_bob_def456abcd",
   fallback: { enabled: true, timeout_ms: 100 },
 };
 
@@ -319,10 +319,20 @@ hub:
 hub:
   users:
     - github_username: alice
-      token: "same_token_here"
+      token: "same_token_here_abcdef"
     - github_username: bob
-      token: "same_token_here"
+      token: "same_token_here_abcdef"
 `);
     expect(() => loadHubConfig(path)).toThrow(/duplicate token/i);
+  });
+
+  it("throws when a user token is shorter than 16 characters", () => {
+    const path = writeTempConfig(`
+hub:
+  users:
+    - github_username: martinv
+      token: "tooshort"
+`);
+    expect(() => loadHubConfig(path)).toThrow(/too short/i);
   });
 });
