@@ -122,11 +122,6 @@ export interface WorktreeConfig {
 }
 
 export interface PRReviewBehavior {
-  /**
-   * Whether to require the agent to enter plan mode before applying any fixes.
-   * When true the instruction should include an explicit EnterPlanMode directive.
-   */
-  require_plan: boolean;
   /** Skill name invoked during the execution phase. */
   skill: string;
   /**
@@ -452,22 +447,14 @@ export const DEFAULT_CONFIG: Config = {
       ].join("\n"),
     },
     on_pr_review: {
-      require_plan: true,
       skill: "pr-comment-response",
-      use_worktree: true,
+      use_worktree: false,
       instruction: [
-        "{worktree_preamble}Plan before acting:",
-        "1. Read every linked thread and summarise what each asks for",
-        "2. List the exact file + change for each thread",
-        "3. Only after planning, use the {skill} skill to execute",
-        "",
-        "Do NOT apply any fix before the plan step is done.",
-        "",
-        "Execution phase:",
-        "1. For each comment thread above, open the link and read full context",
-        "2. Code comments: apply the fix, commit",
-        "3. Questions / style: reply inline with a concise explanation",
-        "4. Use gh-pr-reply.sh --batch to post all replies in one shot",
+        "Act immediately — no confirmation needed.",
+        "1. Call claim_notification first (see claim block below)",
+        "2. Open every linked comment URL and read the full thread",
+        "3. Apply fixes and commit",
+        "4. Use the {skill} skill to post all replies in one shot",
       ].join("\n"),
     },
     on_merge_conflict: {
