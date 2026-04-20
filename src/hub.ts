@@ -1046,16 +1046,22 @@ function startMcpServer(): void {
         return new Response("Not Found", { status: 404 });
       }
 
+      const sessionHeader = req.headers.get("mcp-session-id");
+      log(
+        `→ ${req.method} /mcp session=${sessionHeader?.slice(0, 8) ?? "none"} auth=${req.headers.has("authorization") ? "yes" : "NO"}`,
+      );
+
       // ── Bearer auth ────────────────────────────────────────────────────────
       const profile = bearerAuth(req, tokenMap);
       if (!profile) {
+        log(`← 401 ${req.method} /mcp (invalid or missing Bearer token)`);
         return new Response("Unauthorized — valid Bearer token required", {
           status: 401,
           headers: { "WWW-Authenticate": 'Bearer realm="claude-beacon-hub"' },
         });
       }
 
-      const sessionId = req.headers.get("mcp-session-id");
+      const sessionId = sessionHeader;
 
       if (sessionId) {
         const session = sessions.get(sessionId);
@@ -1069,7 +1075,14 @@ function startMcpServer(): void {
       }
 
       if (req.method !== "POST") {
-        return new Response("Bad Request — send POST to initialize a new session", { status: 400 });
+        // 405 (not 400) — MCP SDK client treats 405 as "SSE GET not supported here"
+        // and falls back gracefully. A 400 causes the SDK to throw StreamableHTTPError
+        // and silently abandon the SSE stream, so notifications never arrive.
+        log(`← 405 ${req.method} /mcp (no session ID — POST first to initialize)`);
+        return new Response("Method Not Allowed — POST to /mcp to initialize a session first", {
+          status: 405,
+          headers: { Allow: "POST" },
+        });
       }
 
       const { server, transport } = createHubSession(profile);

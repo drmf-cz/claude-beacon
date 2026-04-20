@@ -11,6 +11,8 @@
 ### Fix
 - `lastActivityAt` is now updated when a notification is successfully delivered to a session, not only on incoming HTTP requests. Previously, sessions with an open SSE stream but no tool calls would be evicted by the idle TTL even while actively receiving events.
 - Idle TTL eviction now closes the transport (`transport.close()`) so Claude Code receives a clean disconnect signal and reconnects. Previously, the transport was left open — SSE pings kept flowing but the hub had forgotten the session and could not route any notifications to it.
+- Hub `/mcp` GET with no `Mcp-Session-Id` now returns **405** instead of 400. The MCP SDK client (`_startOrAuthSse`) sends a session-less GET before the session ID is known; a 400 caused it to throw `StreamableHTTPError` silently, abandoning the SSE stream — meaning notifications buffered forever. A 405 is handled gracefully by the SDK.
+- Hub `/mcp` requests are now logged at entry (`→ METHOD /mcp session=… auth=yes/NO`) and auth failures are logged before the 401 response, making connection issues immediately visible in the hub output.
 
 ## [1.8.5] — 2026-04-20
 
