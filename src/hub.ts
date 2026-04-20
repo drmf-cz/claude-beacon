@@ -301,6 +301,8 @@ setInterval(
             log(`Stale claim cleared: ${k} (session was idle)`);
           }
         }
+        // Close transport so Claude Code gets a clean disconnect and reconnects.
+        session.transport.close().catch(() => {});
       }
     }
   },
@@ -901,6 +903,7 @@ const routeToSessions: NotifyFn = async (
       const enriched = enrichNotification(notification, claimKey, "owned");
       try {
         await sendChannelNotification(ownerSession.server, enriched);
+        ownerSession.lastActivityAt = Date.now();
         log(
           `Routed to claim owner ${existing.label ?? existing.sessionId.slice(0, 8)}: ${claimKey}`,
         );
@@ -934,6 +937,7 @@ const routeToSessions: NotifyFn = async (
   for (const session of recipients) {
     try {
       await sendChannelNotification(session.server, enriched);
+      session.lastActivityAt = Date.now();
       sent++;
     } catch (err) {
       log("Failed to push notification to session:", err);
@@ -965,6 +969,41 @@ function maybeStartFallback(
 // ── MCP HTTP server ───────────────────────────────────────────────────────────
 
 const MCP_PORT = Number(process.env.MCP_PORT ?? 9444);
+
+// Inject SSE comment pings every 25 s so reverse proxies don't close idle streams.
+// Proxies (nginx default: 60 s) interpret silence as a dead connection.
+const SSE_PING_INTERVAL_MS = 25_000;
+
+function withSsePing(response: Response): Response {
+  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    return response;
+  }
+  const encoder = new TextEncoder();
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      pingTimer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          clearInterval(pingTimer);
+          pingTimer = undefined;
+        }
+      }, SSE_PING_INTERVAL_MS);
+    },
+    flush() {
+      clearInterval(pingTimer);
+      pingTimer = undefined;
+    },
+  });
+
+  return new Response(response.body.pipeThrough(transform), {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
 
 function startMcpServer(): void {
   Bun.serve({
@@ -1026,7 +1065,7 @@ function startMcpServer(): void {
           return new Response("Forbidden", { status: 403 });
         }
         session.lastActivityAt = Date.now();
-        return session.transport.handleRequest(req);
+        return withSsePing(await session.transport.handleRequest(req));
       }
 
       if (req.method !== "POST") {
@@ -1035,7 +1074,7 @@ function startMcpServer(): void {
 
       const { server, transport } = createHubSession(profile);
       await server.connect(transport);
-      return transport.handleRequest(req);
+      return withSsePing(await transport.handleRequest(req));
     },
   });
   log(`MCP HTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
