@@ -41,10 +41,6 @@ describe("DEFAULT_CONFIG", () => {
     expect(DEFAULT_CONFIG.behavior.on_pr_review.skill).toBe("pr-comment-response");
   });
 
-  it("has require_plan=true for pr_review", () => {
-    expect(DEFAULT_CONFIG.behavior.on_pr_review.require_plan).toBe(true);
-  });
-
   it("has non-empty instruction for every behavior hook", () => {
     const hooks = [
       DEFAULT_CONFIG.behavior.on_ci_failure_main,
@@ -114,7 +110,7 @@ describe("loadConfig", () => {
     const cfg = loadConfig(p);
     expect(cfg.behavior.on_pr_review.skill).toBe("my-custom-skill");
     // Other behavior fields unchanged
-    expect(cfg.behavior.on_pr_review.require_plan).toBe(true);
+    expect(cfg.behavior.on_pr_review.use_worktree).toBe(false);
     expect(cfg.behavior.on_ci_failure_main.instruction).toBe(
       DEFAULT_CONFIG.behavior.on_ci_failure_main.instruction,
     );
