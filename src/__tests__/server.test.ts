@@ -476,7 +476,7 @@ describe("buildReviewNotification", () => {
     expect(result.summary).toContain("src/index.ts");
   });
 
-  it("includes plan mode and skill instruction", () => {
+  it("includes action instruction and skill name", () => {
     const events = [
       {
         type: "issue_comment" as const,
@@ -487,7 +487,7 @@ describe("buildReviewNotification", () => {
       },
     ];
     const result = buildReviewNotification(events, meta);
-    expect(result.summary).toContain("Plan before acting");
+    expect(result.summary).toContain("Act immediately");
     expect(result.summary).toContain("pr-comment-response");
   });
 
