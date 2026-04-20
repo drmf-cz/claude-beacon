@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.3] — 2026-04-20
+
+### Fix
+- `NotificationEventStore.replayEventsAfter` (hub + mux): when `lastEventId` is empty or unknown (new/reconnected SSE session with no `Last-Event-ID`), now replays **all** buffered events instead of returning early with `""`. Previously, any notifications sent while the SSE stream was down were silently lost the moment the client reconnected — the hub logged "Pushed to N session(s)" but the events were discarded. Each store is scoped to a single session, so replaying all is safe.
+- `NotificationEventStore.storeEvent`: adds `[sse] no active stream — buffered event` log line so it is immediately visible in hub/mux output when an event is buffered rather than delivered.
+- `sendChannelNotification`: renamed log from "Pushed to Claude" to "Queued for SSE" to clarify that the SDK accepted the call, not that Claude received it.
+- Hub/mux delivery log: renamed "Pushed to N session(s)" to "Accepted by N session(s)" with a pointer to `[sse]` lines for actual delivery status.
+
 ## [1.8.2] — 2026-04-20
 
 ### Fix

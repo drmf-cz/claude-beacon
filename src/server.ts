@@ -1272,7 +1272,7 @@ export async function sendChannelNotification(
     },
   });
   log(
-    `Pushed to Claude: ${notification.meta.event ?? notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
+    `Queued for SSE: ${notification.meta.event ?? notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
   );
 }
 
