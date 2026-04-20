@@ -40,7 +40,8 @@ import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
 import type { CINotification } from "./types.js";
 
-const log = (...args: unknown[]) => console.error("[github-ci:hub]", ...args);
+const log = (...args: unknown[]) =>
+  console.error(`[github-ci:hub] ${new Date().toISOString().slice(11, 23)}`, ...args);
 
 // ── .env loader ───────────────────────────────────────────────────────────────
 // Bun auto-loads .env only from the working directory. When running the compiled
@@ -833,13 +834,14 @@ function createHubSession(profile: HubUserProfile): {
     eventStore: new NotificationEventStore(),
     onsessioninitialized: (id) => {
       sessionId = id;
+      const df = profile.default_filter;
       entry = {
         server,
         transport,
         github_username: profile.github_username,
-        repo: null,
-        branch: null,
-        label: null,
+        repo: df?.repo ?? null,
+        branch: df?.branch ?? null,
+        label: df?.label ? df.label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null,
         worktree_path: null,
         lastActivityAt: Date.now(),
       };
@@ -848,6 +850,21 @@ function createHubSession(profile: HubUserProfile): {
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );
+      if (df) {
+        log(`Auto-filter applied: ${df.repo ?? "*"}@${df.branch ?? "*"}`);
+        const capturedEntry = entry;
+        const repoAllowed =
+          df.repo === null ||
+          config.webhooks.allowed_repos.length === 0 ||
+          config.webhooks.allowed_repos.includes(df.repo);
+        if (repoAllowed) {
+          flushPendingToSession(df.repo ?? null, capturedEntry)
+            .then(() => sendStatusLine(server, buildStatusText(capturedEntry)))
+            .catch((err) => log("Auto-filter flush failed:", err));
+        } else {
+          sendStatusLine(server, buildStatusText(capturedEntry)).catch(() => {});
+        }
+      }
     },
     onsessionclosed: (id) => {
       const session = sessions.get(id);

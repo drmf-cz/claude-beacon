@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.8] — 2026-04-20
+
+### Features
+- `default_filter` in hub user profile: when set, a Claude session is automatically registered with the specified `repo`/`branch` filter the moment it connects — no explicit `set_filter` call needed. Useful for daemon / catch-all sessions (`branch: null` catches all branches). `set_filter` still works as an override to narrow or change the filter after connect.
+- Log timestamps: all three log functions (`[github-ci]`, `[github-ci:hub]`, `[github-ci:mux]`) now include `HH:MM:SS.mmm` timestamps making it easy to correlate webhook arrival, SSE replay, and session events.
+- `config.example.yaml`: document `default_filter` in the hub users block with commented-out examples.
+
 ## [1.8.7] — 2026-04-20
 
 ### Features
