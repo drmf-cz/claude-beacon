@@ -336,6 +336,20 @@ export interface HubUserProfile {
    * Useful when different developers work on repos with different code styles or workflows.
    */
   behavior?: HubUserBehavior;
+  /**
+   * When set, the session is automatically registered with this repo/branch filter
+   * the moment it connects — no explicit set_filter call needed.
+   * Useful for daemon / catch-all sessions.
+   *
+   * repo: null   = match all repositories
+   * branch: null = match all branches in the repo
+   */
+  default_filter?: {
+    repo: string | null;
+    branch: string | null;
+    /** Human-readable label shown in conflict messages. */
+    label?: string | null;
+  };
 }
 
 /**
@@ -699,12 +713,16 @@ export function loadHubConfig(filePath: string): { config: Config; hub: HubConfi
     const skills = user.skills as HubSkillMap | undefined;
     const fallback = user.fallback as HubUserFallback | undefined;
     const behavior = user.behavior as HubUserBehavior | undefined;
+    const default_filter = user.default_filter as
+      | { repo: string | null; branch: string | null; label?: string | null }
+      | undefined;
     return {
       github_username: user.github_username as string,
       token: user.token as string,
       ...(skills !== undefined && { skills }),
       ...(fallback !== undefined && { fallback }),
       ...(behavior !== undefined && { behavior }),
+      ...(default_filter !== undefined && { default_filter }),
     };
   });
 

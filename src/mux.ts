@@ -33,7 +33,8 @@ import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
 import type { CINotification } from "./types.js";
 
-const log = (...args: unknown[]) => console.error("[github-ci:mux]", ...args);
+const log = (...args: unknown[]) =>
+  console.error(`[github-ci:mux] ${new Date().toISOString().slice(11, 23)}`, ...args);
 
 // ── Claim file helpers ─────────────────────────────────────────────────────────
 // Written to ~/.claude/beacon-active-claim so a Claude Code Stop hook can read

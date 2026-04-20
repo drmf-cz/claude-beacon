@@ -290,7 +290,8 @@ export function buildReviewNotification(
 }
 
 // ── Logging ───────────────────────────────────────────────────────────────────
-const log = (...args: unknown[]) => console.error("[github-ci]", ...args);
+const log = (...args: unknown[]) =>
+  console.error(`[github-ci] ${new Date().toISOString().slice(11, 23)}`, ...args);
 
 // ── HMAC-SHA256 Verification ──────────────────────────────────────────────────
 export function verifySignature(payload: string, signature: string | null): boolean {
