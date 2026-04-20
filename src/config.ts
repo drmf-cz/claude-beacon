@@ -452,7 +452,7 @@ export const DEFAULT_CONFIG: Config = {
       instruction: [
         "Act immediately — no confirmation needed.",
         "1. Call claim_notification first (see claim block below)",
-        "2. Open every linked comment URL and read the full thread",
+        "2. Read full comments: gh pr view {pr_number} --repo {repo} --comments",
         "3. Apply fixes and commit",
         "4. Use the {skill} skill to post all replies in one shot",
       ].join("\n"),
