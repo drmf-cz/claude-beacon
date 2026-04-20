@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.4] — 2026-04-20
+
+### Fix
+- `buildReviewNotification`: PR review comment snippets increased from 120 → 400 chars so Claude sees enough context to act without fetching each comment URL individually.
+- `on_pr_review` default instruction: step 2 now reads `gh pr view {pr_number} --repo {repo} --comments` instead of the vague "Open every linked comment URL" — gives Claude a concrete command to fetch full comment text.
+- `buildReviewNotification`: passes `pr_number` and `repo` to instruction `interpolate()` so `{pr_number}` and `{repo}` are available as placeholders in user-configured `on_pr_review.instruction` templates.
+- `hub.test.ts`: replace `delete process.env.X` with `Reflect.deleteProperty(process.env, "X")` to fix TypeScript 6.0 narrowing issue where `delete` permanently narrowed the property to `undefined` even after a function call restored it.
+
 ## [1.8.3] — 2026-04-20
 
 ### Fix
