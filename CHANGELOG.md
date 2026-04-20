@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.7] — 2026-04-21
+
+### Features
+- `server.session_idle_ttl_ms` (default: 30 min): configures how long a hub session can be idle before being evicted. Previously hardcoded. Increase to retain session registrations longer between Claude Code restarts.
+- `server.pending_ttl_ms` (default: 2 hours): configures how long queued notifications are retained while waiting for a matching session. Previously hardcoded. Increase if you start Claude sessions infrequently.
+- `config.example.yaml`: document both new fields with commented-out examples; fix stale `on_pr_review` example (was showing removed `require_plan` field and old plan-mode instruction).
+
 ## [1.8.6] — 2026-04-21
 
 ### Fix
