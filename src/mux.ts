@@ -70,6 +70,9 @@ class NotificationEventStore implements EventStore {
   async storeEvent(streamId: string, message: unknown): Promise<string> {
     const id = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     this.events.set(id, { streamId, message });
+    log(
+      `[sse] no active stream — buffered event ${id.slice(-8)} (total buffered: ${this.events.size})`,
+    );
     return id;
   }
 
@@ -77,12 +80,25 @@ class NotificationEventStore implements EventStore {
     lastEventId: string,
     { send }: { send: (id: string, msg: unknown) => Promise<void> },
   ): Promise<string> {
-    if (!lastEventId || !this.events.has(lastEventId)) return "";
+    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+    // New or unknown SSE connection — replay all buffered events for this session.
+    // Each NotificationEventStore is scoped to one session, so replaying all is safe.
+    if (!lastEventId || !this.events.has(lastEventId)) {
+      if (sorted.length > 0) {
+        log(`[sse] replaying ${sorted.length} buffered event(s) to new SSE connection`);
+      }
+      for (const [id, { message }] of sorted) {
+        await send(id, message);
+      }
+      const last = sorted[sorted.length - 1];
+      return last ? (last[0].split("_")[0] ?? "") : "";
+    }
+
+    // Resume from a known event ID — skip everything up to and including it.
     const streamId = lastEventId.split("_")[0] ?? "";
     let found = false;
-    for (const [id, { streamId: sid, message }] of [...this.events.entries()].sort((a, b) =>
-      a[0].localeCompare(b[0]),
-    )) {
+    for (const [id, { streamId: sid, message }] of sorted) {
       if (sid !== streamId) continue;
       if (id === lastEventId) {
         found = true;
@@ -413,7 +429,9 @@ const routeToSessions: NotifyFn = async (
     }
   }
   if (sent > 0) {
-    log(`Pushed to ${sent} session(s): ${routing.repo}@${routing.branch ?? "*"}`);
+    log(
+      `Accepted by ${sent} session(s): ${routing.repo}@${routing.branch ?? "*"} — see [sse] lines for delivery status`,
+    );
   }
 };
 
