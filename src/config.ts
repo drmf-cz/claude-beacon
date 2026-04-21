@@ -510,11 +510,13 @@ export const DEFAULT_CONFIG: Config = {
       skill: "pr-comment-response",
       use_worktree: false,
       instruction: [
-        "Act immediately — no confirmation needed.",
+        "PR #{pr_number} in {repo} has review comments.",
         "1. Call claim_notification first (see claim block below)",
-        "2. Read full comments: gh pr view {pr_number} --repo {repo} --comments",
-        "3. Apply fixes and commit",
-        "4. Use the {skill} skill to post all replies in one shot",
+        "2. Read all comments: gh pr view {pr_number} --repo {repo} --comments",
+        "3. For each comment thread, draft the proposed code change and reply text",
+        "4. Present a summary table to the user (thread | proposed fix | proposed reply)",
+        "5. WAIT for explicit user approval before making any changes or posting",
+        "After approval: apply fixes, commit, push, then invoke /{skill} to batch-post replies",
       ].join("\n"),
     },
     on_pr_review_as_reviewer: {

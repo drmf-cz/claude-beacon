@@ -14,7 +14,7 @@ let db: Database | null = null;
 
 const SCHEMA_VERSION = 1;
 
-const TABLE_COLUMNS = `(
+const FILTER_TABLE_COLUMNS = `(
     github_username TEXT NOT NULL,
     worktree_path   TEXT NOT NULL DEFAULT '',
     repo            TEXT,
@@ -33,15 +33,105 @@ export function openFilterStore(dbPath: string): void {
       db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version < SCHEMA_VERSION) {
       db.run("DROP TABLE IF EXISTS session_filters");
-      db.run(`CREATE TABLE session_filters ${TABLE_COLUMNS}`);
+      db.run(`CREATE TABLE session_filters ${FILTER_TABLE_COLUMNS}`);
       db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     } else {
-      db.run(`CREATE TABLE IF NOT EXISTS session_filters ${TABLE_COLUMNS}`);
+      db.run(`CREATE TABLE IF NOT EXISTS session_filters ${FILTER_TABLE_COLUMNS}`);
     }
+    // pending_queue is additive — safe to create without bumping schema version
+    db.run(`CREATE TABLE IF NOT EXISTS pending_queue (
+      id           TEXT PRIMARY KEY,
+      repo         TEXT NOT NULL,
+      branch       TEXT,
+      pr_author    TEXT,
+      notification TEXT NOT NULL,
+      routing      TEXT NOT NULL,
+      received_at  INTEGER NOT NULL
+    )`);
     log(`Opened at ${dbPath}`);
   } catch (err) {
     log(`Failed to open — filter persistence disabled: ${err}`);
     db = null;
+  }
+}
+
+// ── Pending queue persistence ─────────────────────────────────────────────────
+
+export interface PersistedPendingEntry {
+  id: string;
+  routing: { repo: string; branch: string | null; pr_author?: string | null };
+  notification: Record<string, unknown>;
+  receivedAt: number;
+}
+
+/** Persist a pending notification to SQLite. No-op if the store is not open. */
+export function savePending(
+  id: string,
+  routing: PersistedPendingEntry["routing"],
+  notification: Record<string, unknown>,
+): void {
+  if (!db) return;
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO pending_queue (id, repo, branch, pr_author, notification, routing, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        routing.repo,
+        routing.branch,
+        routing.pr_author ?? null,
+        JSON.stringify(notification),
+        JSON.stringify(routing),
+        Date.now(),
+      ],
+    );
+  } catch (err) {
+    log(`savePending failed for ${id}: ${err}`);
+  }
+}
+
+/** Load all persisted pending notifications, oldest first. */
+export function loadAllPending(): PersistedPendingEntry[] {
+  if (!db) return [];
+  try {
+    const rows = db
+      .query<{ id: string; routing: string; notification: string; received_at: number }, []>(
+        "SELECT id, routing, notification, received_at FROM pending_queue ORDER BY received_at ASC",
+      )
+      .all();
+    return rows.map((row) => ({
+      id: row.id,
+      routing: JSON.parse(row.routing) as PersistedPendingEntry["routing"],
+      notification: JSON.parse(row.notification) as Record<string, unknown>,
+      receivedAt: row.received_at,
+    }));
+  } catch (err) {
+    log(`loadAllPending failed: ${err}`);
+    return [];
+  }
+}
+
+/** Delete a single pending notification by id (call after successful delivery). */
+export function deletePending(id: string): void {
+  if (!db) return;
+  try {
+    db.run("DELETE FROM pending_queue WHERE id = ?", [id]);
+  } catch (err) {
+    log(`deletePending failed for ${id}: ${err}`);
+  }
+}
+
+/** Delete all pending notifications older than maxAgeMs. Returns count deleted. */
+export function deleteExpiredPending(maxAgeMs: number): number {
+  if (!db) return 0;
+  try {
+    const result = db.run("DELETE FROM pending_queue WHERE received_at < ?", [
+      Date.now() - maxAgeMs,
+    ]);
+    return result.changes;
+  } catch (err) {
+    log(`deleteExpiredPending failed: ${err}`);
+    return 0;
   }
 }
 

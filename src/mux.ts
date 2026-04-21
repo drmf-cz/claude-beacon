@@ -21,95 +21,26 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { DEFAULT_CONFIG, loadConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
-import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
+import {
+  claimKeyFor,
+  createMcpServer,
+  deleteClaimFile,
+  enrichNotification,
+  NotificationEventStore,
+  sendChannelNotification,
+  sendStatusLine,
+  startWebhookServer,
+  writeClaimFile,
+} from "./server.js";
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) =>
   console.error(`[github-ci:mux] ${new Date().toISOString().slice(11, 23)}`, ...args);
-
-// ── Claim file helpers ─────────────────────────────────────────────────────────
-// Written to ~/.claude/beacon-active-claim so a Claude Code Stop hook can read
-// the current claim key and POST /release-claim to free it without an MCP call.
-
-const CLAIM_FILE = join(homedir(), ".claude", "beacon-active-claim");
-
-function writeClaimFile(claimKey: string): void {
-  try {
-    writeFileSync(CLAIM_FILE, claimKey, "utf8");
-  } catch {
-    // Non-fatal — Stop hook will fall back to TTL expiry
-  }
-}
-
-function deleteClaimFile(): void {
-  try {
-    rmSync(CLAIM_FILE, { force: true });
-  } catch {
-    // Non-fatal
-  }
-}
-
-// ── Notification event store ───────────────────────────────────────────────────
-// The MCP Streamable HTTP transport sends notifications via the standalone GET
-// SSE stream. If that connection is temporarily down (Claude Code reconnecting),
-// the SDK silently drops the event — no exception, so the caller never knows.
-// Providing an EventStore causes the SDK to buffer missed events and replay them
-// the next time the client opens a GET /mcp request with Last-Event-ID.
-
-class NotificationEventStore implements EventStore {
-  private events = new Map<string, { streamId: string; message: unknown }>();
-
-  async storeEvent(streamId: string, message: unknown): Promise<string> {
-    const id = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    this.events.set(id, { streamId, message });
-    log(
-      `[sse] no active stream — buffered event ${id.slice(-8)} (total buffered: ${this.events.size})`,
-    );
-    return id;
-  }
-
-  async replayEventsAfter(
-    lastEventId: string,
-    { send }: { send: (id: string, msg: unknown) => Promise<void> },
-  ): Promise<string> {
-    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-
-    // New or unknown SSE connection — replay all buffered events for this session.
-    // Each NotificationEventStore is scoped to one session, so replaying all is safe.
-    if (!lastEventId || !this.events.has(lastEventId)) {
-      if (sorted.length > 0) {
-        log(`[sse] replaying ${sorted.length} buffered event(s) to new SSE connection`);
-      }
-      for (const [id, { message }] of sorted) {
-        await send(id, message);
-      }
-      const last = sorted[sorted.length - 1];
-      return last ? (last[0].split("_")[0] ?? "") : "";
-    }
-
-    // Resume from a known event ID — skip everything up to and including it.
-    const streamId = lastEventId.split("_")[0] ?? "";
-    let found = false;
-    for (const [id, { streamId: sid, message }] of sorted) {
-      if (sid !== streamId) continue;
-      if (id === lastEventId) {
-        found = true;
-        continue;
-      }
-      if (found) await send(id, message);
-    }
-    return streamId;
-  }
-}
 
 // ── Session registry ──────────────────────────────────────────────────────────
 
@@ -156,10 +87,6 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-function claimKeyFor(routing: RoutingKey): string {
-  return routing.branch ? `${routing.repo}:${routing.branch}` : `${routing.repo}:*`;
-}
-
 const sessions = new Map<string, SessionEntry>();
 
 // ── Pre-registration notification queue ───────────────────────────────────────
@@ -181,9 +108,6 @@ interface PendingNotification {
 /** Events queued while no session was registered. Keyed by repo ("owner/repo"). */
 const pendingByRepo = new Map<string, PendingNotification[]>();
 
-/** How long a queued notification stays relevant before being discarded. */
-const PENDING_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
-
 /** Maximum distinct repo keys held in the pending queue (DoS guard). */
 const MAX_PENDING_REPOS = 100;
 /** Maximum queued notifications per repo (DoS guard). */
@@ -200,7 +124,7 @@ function enqueuePending(routing: RoutingKey, notification: CINotification): void
   }
 
   const existing = (pendingByRepo.get(key) ?? []).filter(
-    (n) => now - n.receivedAt < PENDING_TTL_MS,
+    (n) => now - n.receivedAt < config.server.pending_ttl_ms,
   );
 
   if (existing.length >= MAX_PENDING_PER_REPO) {
@@ -220,7 +144,7 @@ async function flushPendingToSession(repo: string | null, session: SessionEntry)
   for (const key of keys) {
     const pending = pendingByRepo.get(key);
     if (!pending || pending.length === 0) continue;
-    const fresh = pending.filter((n) => now - n.receivedAt < PENDING_TTL_MS);
+    const fresh = pending.filter((n) => now - n.receivedAt < config.server.pending_ttl_ms);
     if (fresh.length === 0) {
       pendingByRepo.delete(key);
       continue;
@@ -249,15 +173,15 @@ async function flushPendingToSession(repo: string | null, session: SessionEntry)
 // Streamable HTTP has no persistent connection, so onsessionclosed is not
 // reliably called when Claude Code exits or context-resets. Without this cleanup
 // sessions accumulate indefinitely and receive routing noise.
-const SESSION_IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 setInterval(
   () => {
     const now = Date.now();
     for (const [id, session] of sessions) {
-      if (now - session.lastActivityAt > SESSION_IDLE_TTL_MS) {
+      if (now - session.lastActivityAt > config.server.session_idle_ttl_ms) {
         sessions.delete(id);
-        log(`Session ${id.slice(0, 8)} idle >30 min — removed (total: ${sessions.size})`);
+        const idleMin = Math.round(config.server.session_idle_ttl_ms / 60_000);
+        log(`Session ${id.slice(0, 8)} idle >${idleMin} min — removed (total: ${sessions.size})`);
         // Clean up any stale claims owned by this session
         for (const [k, c] of workClaims) {
           if (c.sessionId === id) {
@@ -309,67 +233,6 @@ function selectRecipients(
   // Tier 3: no matching session → catch-all, any session for this repo
   const catchall = [...sessionMap.values()].filter(forRepo);
   return { recipients: catchall, mode: "catchall" };
-}
-
-/**
- * Enrich a notification with claim instructions before delivery.
- *
- * Modes:
- *   "owned"   — pre-routing sent to owner; no claim instruction needed
- *   "normal"  — claim instruction + worktree decision tree
- *   "catchall"— "⚠️ CATCH-ALL" header; all recipients must create a worktree
- */
-function enrichNotification(
-  n: CINotification,
-  claimKey: string,
-  mode: "owned" | "normal" | "catchall",
-): CINotification {
-  const meta = { ...n.meta, claim_key: claimKey };
-  if (mode === "owned") return { meta, summary: n.summary };
-
-  const branch = n.meta.branch ?? n.meta.head_branch ?? null;
-  const branchSlug = branch?.replace(/[^a-z0-9]/gi, "-") ?? "fix";
-
-  const catchallHeader =
-    mode === "catchall"
-      ? [
-          "⚠️  CATCH-ALL DELIVERY: no session is currently in the worktree for this branch.",
-          "One of you must volunteer by claiming it and creating a worktree.",
-          "",
-        ]
-      : [];
-
-  const worktreeBlock = branch
-    ? [
-        `IF claim returns "ok":`,
-        `  a) Your current branch IS "${branch}":`,
-        `     → Fix here in your current directory`,
-        `  b) Your current branch IS NOT "${branch}":`,
-        `     → git worktree add /tmp/${branchSlug}-fix ${branchSlug}`,
-        `     → Fix in that worktree, commit, push`,
-        `     → Call release_claim("${claimKey}") when done`,
-        `     → git worktree remove /tmp/${branchSlug}-fix`,
-      ]
-    : [
-        `IF claim returns "ok": fix in your current directory.`,
-        `Call release_claim("${claimKey}") when done.`,
-      ];
-
-  const claimBlock = [
-    "",
-    "─────────────────────────────────────────",
-    ...catchallHeader,
-    `BEFORE ACTING: call claim_notification("${claimKey}")`,
-    '  "ok"           → you have the lock, continue',
-    '  "already_owned"→ you already hold it (TTL extended); continue if still working',
-    '  "conflict:X"   → session X claimed it, STOP immediately',
-    '  "expired"      → STOP',
-    "",
-    ...worktreeBlock,
-    "─────────────────────────────────────────",
-  ].join("\n");
-
-  return { meta, summary: n.summary + claimBlock };
 }
 
 const routeToSessions: NotifyFn = async (
@@ -435,24 +298,6 @@ const routeToSessions: NotifyFn = async (
     );
   }
 };
-
-// ── Status line ───────────────────────────────────────────────────────────────
-
-/**
- * Send a `notifications/claude/statusLine` notification to update the
- * persistent status indicator in the Claude Code UI for this session.
- * Errors are swallowed — the status line is best-effort.
- */
-async function sendStatusLine(server: McpServer, text: string): Promise<void> {
-  try {
-    await server.server.notification({
-      method: "notifications/claude/statusLine",
-      params: { text },
-    });
-  } catch {
-    // Best-effort — some Claude Code versions may not support statusLine
-  }
-}
 
 function buildStatusText(entry: SessionEntry, claimKey?: string, claimExpiresAt?: number): string {
   const reg = entry.branch
@@ -631,7 +476,7 @@ function createSession(): {
       sessionId = id;
       return id;
     },
-    eventStore: new NotificationEventStore(),
+    eventStore: new NotificationEventStore(log),
     onsessioninitialized: (id) => {
       sessionId = id;
       entry = {

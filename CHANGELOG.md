@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.13.0] — 2026-04-21
+
+### Features
+- **Persistent pending queue** (`src/store.ts`, `src/hub.ts`): pending notifications now survive hub restarts via a new `pending_queue` SQLite table in the same database as session filters. On startup the hub restores the queue from SQLite; delivered items are deleted individually; expired items are purged every 5 minutes. Configurable via `server.pending_ttl_ms` — set up to `604800000` (7 days).
+
+### Fix
+- **`on_pr_review` instruction now shows a table and waits for approval** (`src/config.ts`, `config.example.yaml`): removed "Act immediately — no confirmation needed." from the default `on_pr_review` instruction. The new default presents a summary table of proposed changes/replies in the session and waits for explicit user approval before making any changes or posting to GitHub. The skill invocation now uses the slash-command form `/{skill}` so it is correctly invoked by Claude Code.
+- **Debounce routing key locked to first event** (`src/server.ts`): `issue_comment` payloads have no `pull_request.head.ref`, so when `issue_comment` was the last event to extend the debounce window, its `branch=null` routing key overwrote the real PR branch and the notification was delivered to every session for that repo regardless of branch filter. The `onFire` callback is now stored in `PendingPRReview` at creation and reused on all timer extensions.
+
 ## [1.12.0] — 2026-04-21
 
 ### Features
