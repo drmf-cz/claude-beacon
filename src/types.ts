@@ -27,6 +27,7 @@ export interface WorkflowJob {
   conclusion: string | null;
   status: string;
   html_url: string;
+  head_branch: string | null;
   runner_name?: string;
   labels?: string[];
   steps?: Array<{ name: string; conclusion: string | null }>;
@@ -34,6 +35,7 @@ export interface WorkflowJob {
 
 export interface CheckSuite {
   conclusion: string | null;
+  head_branch: string | null;
   app?: { name: string };
 }
 
@@ -41,6 +43,8 @@ export interface CheckRun {
   name: string;
   conclusion: string | null;
   html_url: string;
+  head_branch?: string | null;
+  check_suite?: { head_branch: string | null };
   app?: { name: string };
 }
 

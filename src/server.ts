@@ -1332,6 +1332,28 @@ export function extractEventRouting(event: string, payload: GitHubWebhookPayload
     return { repo, branch: payload.pull_request?.head.ref ?? null, pr_author: prAuthor };
   }
 
+  if (event === "check_suite") {
+    return {
+      repo,
+      branch: payload.check_suite?.head_branch ?? null,
+      pr_author: payload.sender?.login ?? null,
+    };
+  }
+
+  if (event === "check_run") {
+    const branch =
+      payload.check_run?.head_branch ?? payload.check_run?.check_suite?.head_branch ?? null;
+    return { repo, branch, pr_author: payload.sender?.login ?? null };
+  }
+
+  if (event === "workflow_job") {
+    return {
+      repo,
+      branch: payload.workflow_job?.head_branch ?? null,
+      pr_author: payload.sender?.login ?? null,
+    };
+  }
+
   return { repo, branch: null, pr_author: payload.sender?.login ?? null };
 }
 
