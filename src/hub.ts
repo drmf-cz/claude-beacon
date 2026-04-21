@@ -1189,6 +1189,9 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
       hubConfig.session_store_path ?? join(dirname(resolve(configPath)), "hub-session-filters.db");
     openFilterStore(dbPath);
     log(`Session filter store: ${dbPath}`);
+    log(
+      `Timeouts: idle=${config.server.session_idle_ttl_ms / 60_000}m pending=${config.server.pending_ttl_ms / 60_000}m debounce=${config.server.debounce_ms}ms review_debounce=${config.server.review_debounce_ms}ms`,
+    );
   } else {
     // ── Single-user --author mode ────────────────────────────────────────────
     // Load .env from CWD (no config file path to derive from).
@@ -1224,6 +1227,9 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     tokenMap = new Map([[bearerToken, profile]]);
     openFilterStore(join(process.cwd(), "hub-session-filters.db"));
     log(`Session filter store: ${process.cwd()}/hub-session-filters.db`);
+    log(
+      `Single-user mode: no config file — all timeouts use defaults (idle=30m, pending=120m). Use --config to customise.`,
+    );
 
     const mcpPort = Number(process.env.MCP_PORT ?? 9444);
     process.stderr.write(
