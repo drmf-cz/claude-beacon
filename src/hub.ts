@@ -746,24 +746,87 @@ function createHubSession(profile: HubUserProfile): {
   );
 
   server.tool(
-    "get_filter",
-    "Return this session's current repo/branch/label/worktree_path filter. Useful for verifying set_filter was called correctly.",
+    "get_status",
+    [
+      "Return a full diagnostic snapshot of this hub session: current filter,",
+      "active work claims, pending notification queue (events waiting for a",
+      "matching session), and all other registered sessions so you can see what",
+      "repos/branches are covered and which events fall outside your filter.",
+    ].join(" "),
     {},
     async () => {
-      const repo = entry?.repo ?? null;
-      const branch = entry?.branch ?? null;
-      const label = entry?.label ?? null;
-      const worktree_path = entry?.worktree_path ?? null;
-      log(
-        `get_filter → ${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"} worktree=${worktree_path ?? "-"}`,
-      );
+      const now = Date.now();
+
+      // ── This session ──────────────────────────────────────────────────────
+      const filter = {
+        repo: entry?.repo ?? null,
+        branch: entry?.branch ?? null,
+        label: entry?.label ?? null,
+        worktree_path: entry?.worktree_path ?? null,
+      };
+
+      const idleMs = entry ? now - entry.lastActivityAt : 0;
+      const idleMin = Math.round(idleMs / 60_000);
+
+      // ── Active claims held by this session ────────────────────────────────
+      const myClaims = [...workClaims.entries()]
+        .filter(([, c]) => c.sessionId === sessionId)
+        .map(([key, c]) => ({
+          key,
+          label: c.label,
+          expires_in: `${Math.max(0, Math.ceil((c.expiresAt - now) / 60_000))}m`,
+        }));
+
+      // ── Pending queue (events waiting for a session) ──────────────────────
+      const pendingQueue = [...pendingByRepo.entries()]
+        .map(([repo, items]) => {
+          const fresh = items.filter((n) => now - n.receivedAt < config.server.pending_ttl_ms);
+          return {
+            repo,
+            count: fresh.length,
+            oldest_age: fresh.length
+              ? `${Math.round((now - (fresh[0]?.receivedAt ?? now)) / 60_000)}m`
+              : null,
+            branches: [...new Set(fresh.map((n) => n.routing.branch ?? "*"))],
+          };
+        })
+        .filter((r) => r.count > 0);
+
+      // ── All active sessions (hub-wide view) ───────────────────────────────
+      const allSessions = [...sessions.entries()].map(([id, s]) => ({
+        session_id: id.slice(0, 8),
+        user: s.github_username,
+        repo: s.repo ?? "*",
+        branch: s.branch ?? "*",
+        label: s.label ?? null,
+        idle: `${Math.round((now - s.lastActivityAt) / 60_000)}m`,
+        is_me: id === sessionId,
+      }));
+
+      // ── Config timeouts ───────────────────────────────────────────────────
+      const timeouts = {
+        session_idle_ttl: `${Math.round(config.server.session_idle_ttl_ms / 60_000)}m`,
+        pending_ttl: `${Math.round(config.server.pending_ttl_ms / 60_000)}m`,
+        debounce_ms: config.server.debounce_ms,
+        review_debounce_ms: config.server.review_debounce_ms,
+      };
+
+      const result = {
+        session: {
+          id: sessionId.slice(0, 8),
+          user: profile.github_username,
+          idle: `${idleMin}m`,
+          filter,
+        },
+        active_claims: myClaims,
+        pending_queue: pendingQueue,
+        all_sessions: allSessions,
+        config: timeouts,
+      };
+
+      log(`get_status called by ${profile.github_username} (${sessionId.slice(0, 8)})`);
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ repo, branch, label, worktree_path }, null, 2),
-          },
-        ],
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     },
   );
