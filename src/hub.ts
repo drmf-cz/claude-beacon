@@ -38,7 +38,7 @@ import type { Config, HubConfig, HubUserBehavior, HubUserProfile } from "./confi
 import { DEFAULT_CONFIG, loadHubConfig, resolveUserConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
-import { loadFilter, openFilterStore, saveFilter } from "./store.js";
+import { loadUniqueFilter, openFilterStore, saveFilter } from "./store.js";
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) =>
@@ -701,7 +701,7 @@ function createHubSession(profile: HubUserProfile): {
         entry.branch = branch;
         entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
         entry.worktree_path = worktree_path ?? null;
-        saveFilter(profile.github_username, {
+        saveFilter(profile.github_username, entry.worktree_path, {
           repo,
           branch,
           label: entry.label,
@@ -844,7 +844,9 @@ function createHubSession(profile: HubUserProfile): {
     onsessioninitialized: (id) => {
       sessionId = id;
       const df = profile.default_filter;
-      const pf = loadFilter(profile.github_username);
+      // Only restore if user has exactly one DB row — avoids wrong-filter restoration for
+      // multi-session users whose last set_filter call may have come from a different session.
+      const pf = loadUniqueFilter(profile.github_username);
 
       // Priority: persisted filter (from last set_filter call) > default_filter from config > null
       const effectiveRepo = pf?.repo ?? df?.repo ?? null;
@@ -866,7 +868,7 @@ function createHubSession(profile: HubUserProfile): {
       sessions.set(id, entry);
       addUserSession(profile.github_username, id);
 
-      const source = pf ? "persisted" : df ? "default_filter" : "none";
+      const source = pf ? "persisted (unique)" : df ? "default_filter" : "none";
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );

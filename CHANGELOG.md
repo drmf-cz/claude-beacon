@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0] — 2026-04-21
+
+### Fix
+- **Per-worktree session filter persistence** (`src/store.ts`): the SQLite store now uses a composite `PRIMARY KEY (github_username, worktree_path)` instead of `github_username` alone. Previously, the last `set_filter` call from any session overwrote a single shared row, so after a hub restart every session for the same user got the wrong filter. Now each logical session location (identified by its worktree filesystem path) has its own independent row.
+- **Safe multi-session restore** (`loadUniqueFilter`): on session reconnect, the hub restores the persisted filter only when the user has exactly one DB row (single-session user — unambiguous). If a user has two or more rows (multi-session), no restoration is attempted and the session starts with `default_filter` or null/null — the same behaviour as before persistence was added, but without the risk of applying another session's filter.
+- **Schema migration**: `openFilterStore` now uses `PRAGMA user_version` to detect and migrate the v1.10.0 single-PK schema to the new composite-PK schema without requiring a manual DB deletion.
+
 ## [1.10.0] — 2026-04-21
 
 ### Features
