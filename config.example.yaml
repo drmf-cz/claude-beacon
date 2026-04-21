@@ -201,13 +201,16 @@ behavior:
     use_worktree: false
 
     instruction: |
-      PR #{pr_number} in {repo} has review comments.
+      PR #{pr_number} ({repo}) has review comments — you are the PR AUTHOR.
       1. Call claim_notification first (see claim block below)
-      2. Read all comments: gh pr view {pr_number} --repo {repo} --comments
-      3. For each comment thread, draft the proposed code change and reply text
-      4. Present a summary table to the user (thread | proposed fix | proposed reply)
-      5. WAIT for explicit user approval before making any changes or posting
-      After approval: apply fixes, commit, push, then invoke /{skill} to batch-post replies
+      2. Run: gh pr view {pr_number} --repo {repo} --comments
+      3. Run: gh pr diff {pr_number} --repo {repo}
+      4. Output a markdown table IN THIS SESSION (do NOT post to GitHub yet):
+         | Thread | File:line | Proposed fix | Proposed reply |
+         |--------|-----------|--------------|----------------|
+         (one row per comment thread)
+      5. STOP — wait for explicit user approval of the table
+      After approval: apply fixes, commit, push, then use the pr-comment-response skill to batch-post all replies.
 
   # Triggered when a PR review, inline comment, or unresolved thread arrives and
   # the receiving session is the PR REVIEWER (not the author). The hub routes this
@@ -218,15 +221,16 @@ behavior:
     skill: review-pr
     use_worktree: false
     instruction: |
-      You are a PR REVIEWER on PR #{pr_number} in {repo} — you did NOT author this PR.
-      Do NOT modify any code. Do NOT post any comments yet.
+      PR #{pr_number} ({repo}) has activity — you are a REVIEWER (not the PR author).
       1. Call claim_notification first (see claim block below)
-      2. Read the full PR context:
-         gh pr view {pr_number} --repo {repo} --comments
-         gh pr diff {pr_number} --repo {repo}
-      3. For each comment thread, draft a proposed response
-      4. Enter plan mode and present your proposed review responses to the user for approval
-      Wait for explicit user approval before posting anything.
+      2. Run: gh pr view {pr_number} --repo {repo} --comments
+      3. Run: gh pr diff {pr_number} --repo {repo}
+      4. Output a review summary IN THIS SESSION (do NOT post to GitHub yet):
+         - Summary of what the PR does
+         - Each comment thread: what was asked, your suggested response
+         - Any code issues you spotted independently
+      5. STOP — wait for explicit user approval before posting anything to GitHub
+      After approval: use the review-pr skill to post the review.
 
   # Triggered when a PR has merge conflicts (mergeable_state=dirty).
   # Placeholders: {repo}, {pr_number}, {pr_title}, {pr_url}, {head_branch},
