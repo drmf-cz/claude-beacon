@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.10.0] — 2026-04-21
+
+### Features
+- **Session filter persistence** (`src/store.ts`): hub sessions now persist their last `set_filter` values to a SQLite file (`hub-session-filters.db` next to the config). When the hub restarts and Claude Code auto-reconnects, the filter is restored automatically — no manual `set_filter` call needed. Priority: persisted filter > `default_filter` from config > null/null.
+- `hub.session_store_path` config option: override the SQLite file location (useful for shared volumes or non-standard layouts).
+
 ## [1.9.0] — 2026-04-21
 
 ### Features

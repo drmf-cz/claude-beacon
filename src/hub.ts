@@ -38,6 +38,7 @@ import type { Config, HubConfig, HubUserBehavior, HubUserProfile } from "./confi
 import { DEFAULT_CONFIG, loadHubConfig, resolveUserConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
+import { loadFilter, openFilterStore, saveFilter } from "./store.js";
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) =>
@@ -700,6 +701,12 @@ function createHubSession(profile: HubUserProfile): {
         entry.branch = branch;
         entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
         entry.worktree_path = worktree_path ?? null;
+        saveFilter(profile.github_username, {
+          repo,
+          branch,
+          label: entry.label,
+          worktree_path: entry.worktree_path,
+        });
       }
       log(
         `Filter set → ${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"}`,
@@ -837,30 +844,42 @@ function createHubSession(profile: HubUserProfile): {
     onsessioninitialized: (id) => {
       sessionId = id;
       const df = profile.default_filter;
+      const pf = loadFilter(profile.github_username);
+
+      // Priority: persisted filter (from last set_filter call) > default_filter from config > null
+      const effectiveRepo = pf?.repo ?? df?.repo ?? null;
+      const effectiveBranch = pf?.branch ?? df?.branch ?? null;
+      const rawLabel = pf?.label ?? df?.label ?? null;
+      const effectiveLabel = rawLabel ? rawLabel.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
+      const effectivePath = pf?.worktree_path ?? null;
+
       entry = {
         server,
         transport,
         github_username: profile.github_username,
-        repo: df?.repo ?? null,
-        branch: df?.branch ?? null,
-        label: df?.label ? df.label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null,
-        worktree_path: null,
+        repo: effectiveRepo,
+        branch: effectiveBranch,
+        label: effectiveLabel,
+        worktree_path: effectivePath,
         lastActivityAt: Date.now(),
       };
       sessions.set(id, entry);
       addUserSession(profile.github_username, id);
+
+      const source = pf ? "persisted" : df ? "default_filter" : "none";
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );
-      if (df) {
-        log(`Auto-filter applied: ${df.repo ?? "*"}@${df.branch ?? "*"}`);
+
+      if (pf !== null || df !== undefined) {
+        log(`Auto-filter applied: ${effectiveRepo ?? "*"}@${effectiveBranch ?? "*"} [${source}]`);
         const capturedEntry = entry;
         const repoAllowed =
-          df.repo === null ||
+          effectiveRepo === null ||
           config.webhooks.allowed_repos.length === 0 ||
-          config.webhooks.allowed_repos.includes(df.repo);
+          config.webhooks.allowed_repos.includes(effectiveRepo);
         if (repoAllowed) {
-          flushPendingToSession(df.repo ?? null, capturedEntry)
+          flushPendingToSession(effectiveRepo, capturedEntry)
             .then(() => sendStatusLine(server, buildStatusText(capturedEntry)))
             .catch((err) => log("Auto-filter flush failed:", err));
         } else {
@@ -1150,6 +1169,10 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     tokenMap = new Map(hubConfig.users.map((u) => [u.token, u]));
     config.webhooks.allowed_authors = hubConfig.users.map((u) => u.github_username);
     log(`Hub users: ${hubConfig.users.map((u) => u.github_username).join(", ")}`);
+    const dbPath =
+      hubConfig.session_store_path ?? join(dirname(resolve(configPath)), "hub-session-filters.db");
+    openFilterStore(dbPath);
+    log(`Session filter store: ${dbPath}`);
   } else {
     // ── Single-user --author mode ────────────────────────────────────────────
     // Load .env from CWD (no config file path to derive from).
@@ -1183,6 +1206,8 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     config = { ...DEFAULT_CONFIG };
     config.webhooks.allowed_authors = [authorArg as string];
     tokenMap = new Map([[bearerToken, profile]]);
+    openFilterStore(join(process.cwd(), "hub-session-filters.db"));
+    log(`Session filter store: ${process.cwd()}/hub-session-filters.db`);
 
     const mcpPort = Number(process.env.MCP_PORT ?? 9444);
     process.stderr.write(

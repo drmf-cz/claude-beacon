@@ -307,6 +307,12 @@ code_style: ""
 # ─────────────────────────────────────────────────────────────────────────────
 
 # hub:
+#   # Path to the SQLite file used to persist session filters across hub restarts.
+#   # When a session reconnects after a hub restart, the last set_filter values are
+#   # automatically restored — no manual set_filter call needed.
+#   # Default: next to this config file as "hub-session-filters.db".
+#   # session_store_path: "/var/lib/claude-beacon/session-filters.db"
+#
 #   # Global fallback defaults — can be overridden per user.
 #   # The fallback worker calls the Anthropic API when a user's sessions are
 #   # unresponsive for fallback.timeout_ms. Requires ANTHROPIC_API_KEY in .env.
