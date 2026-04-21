@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeFilterStore, loadUniqueFilter, openFilterStore, saveFilter } from "../store.js";
+import {
+  closeFilterStore,
+  deleteExpiredPending,
+  deletePending,
+  loadAllPending,
+  loadUniqueFilter,
+  openFilterStore,
+  saveFilter,
+  savePending,
+} from "../store.js";
 
 let testDir: string;
 
@@ -234,6 +243,91 @@ describe("loadUniqueFilter — multi-session semantics", () => {
       worktree_path: "/tmp/a",
     });
     expect(loadUniqueFilter("alice")).toBeNull();
+  });
+});
+
+// ── pending queue ─────────────────────────────────────────────────────────────
+
+const sampleRouting = { repo: "org/repo", branch: "main" as string | null, pr_author: "alice" };
+const sampleNotif = { summary: "CI failed", meta: { repo: "org/repo" } };
+
+describe("pending queue: savePending / loadAllPending / deletePending", () => {
+  it("returns empty array when nothing saved", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    expect(loadAllPending()).toEqual([]);
+  });
+
+  it("round-trips a notification", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    savePending("id-1", sampleRouting, sampleNotif);
+    const items = loadAllPending();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe("id-1");
+    expect(items[0]?.routing.repo).toBe("org/repo");
+    expect(items[0]?.routing.branch).toBe("main");
+    expect(items[0]?.routing.pr_author).toBe("alice");
+    expect((items[0]?.notification as { summary: string }).summary).toBe("CI failed");
+  });
+
+  it("round-trips null branch", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    savePending("id-null", { repo: "org/repo", branch: null }, sampleNotif);
+    const items = loadAllPending();
+    expect(items[0]?.routing.branch).toBeNull();
+  });
+
+  it("deletes a single entry by id", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    savePending("id-1", sampleRouting, sampleNotif);
+    savePending("id-2", { repo: "org/other", branch: null }, sampleNotif);
+    deletePending("id-1");
+    const items = loadAllPending();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe("id-2");
+  });
+
+  it("returns items in oldest-first order", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    savePending("id-a", sampleRouting, sampleNotif);
+    savePending("id-b", sampleRouting, sampleNotif);
+    savePending("id-c", sampleRouting, sampleNotif);
+    const ids = loadAllPending().map((i) => i.id);
+    expect(ids).toEqual(["id-a", "id-b", "id-c"]);
+  });
+
+  it("is a no-op when store is closed", () => {
+    expect(() => savePending("id-1", sampleRouting, sampleNotif)).not.toThrow();
+    expect(loadAllPending()).toEqual([]);
+    expect(() => deletePending("id-1")).not.toThrow();
+  });
+});
+
+describe("pending queue: deleteExpiredPending", () => {
+  it("deletes entries older than maxAgeMs", () => {
+    const dbPath = join(testDir, "filters.db");
+    openFilterStore(dbPath);
+    savePending("old", sampleRouting, sampleNotif);
+    // Back-date the "old" row so it falls outside the TTL window
+    const { Database } = require("bun:sqlite");
+    const patcher = new Database(dbPath);
+    patcher.run("UPDATE pending_queue SET received_at = ? WHERE id = 'old'", [Date.now() - 10_000]);
+    patcher.close();
+    savePending("fresh", sampleRouting, sampleNotif);
+    const deleted = deleteExpiredPending(5_000); // 5 s TTL — only "old" qualifies
+    expect(deleted).toBe(1);
+    const remaining = loadAllPending();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.id).toBe("fresh");
+  });
+
+  it("returns 0 when nothing to delete", () => {
+    openFilterStore(join(testDir, "filters.db"));
+    savePending("fresh", sampleRouting, sampleNotif);
+    expect(deleteExpiredPending(60_000)).toBe(0);
+  });
+
+  it("is a no-op when store is closed", () => {
+    expect(deleteExpiredPending(1)).toBe(0);
   });
 });
 

@@ -46,7 +46,15 @@ import {
   startWebhookServer,
   writeClaimFile,
 } from "./server.js";
-import { loadUniqueFilter, openFilterStore, saveFilter } from "./store.js";
+import {
+  deleteExpiredPending,
+  deletePending,
+  loadAllPending,
+  loadUniqueFilter,
+  openFilterStore,
+  saveFilter,
+  savePending,
+} from "./store.js";
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) =>
@@ -165,6 +173,7 @@ setInterval(() => {
 // ── Pre-registration notification queue ──────────────────────────────────────
 
 interface PendingNotification {
+  id: string;
   notification: CINotification;
   routing: RoutingKey;
   receivedAt: number;
@@ -173,6 +182,26 @@ interface PendingNotification {
 const pendingByRepo = new Map<string, PendingNotification[]>();
 const MAX_PENDING_REPOS = 100;
 const MAX_PENDING_PER_REPO = 50;
+
+function restorePendingFromStore(): void {
+  const items = loadAllPending();
+  const now = Date.now();
+  let count = 0;
+  for (const item of items) {
+    if (now - item.receivedAt >= config.server.pending_ttl_ms) continue;
+    const key = item.routing.repo ?? "*";
+    const existing = pendingByRepo.get(key) ?? [];
+    existing.push({
+      id: item.id,
+      notification: item.notification as unknown as CINotification,
+      routing: item.routing as RoutingKey,
+      receivedAt: item.receivedAt,
+    });
+    pendingByRepo.set(key, existing);
+    count++;
+  }
+  if (count > 0) log(`Restored ${count} pending notification(s) from SQLite`);
+}
 
 function enqueuePending(routing: RoutingKey, notification: CINotification): void {
   const key = routing.repo ?? "*";
@@ -185,8 +214,10 @@ function enqueuePending(routing: RoutingKey, notification: CINotification): void
     (n) => now - n.receivedAt < config.server.pending_ttl_ms,
   );
   if (existing.length >= MAX_PENDING_PER_REPO) existing.shift();
-  existing.push({ notification, routing, receivedAt: now });
+  const id = randomUUID();
+  existing.push({ id, notification, routing, receivedAt: now });
   pendingByRepo.set(key, existing);
+  savePending(id, routing, notification as unknown as Record<string, unknown>);
   log(
     `Queued for replay (no session): ${routing.repo}@${routing.branch ?? "*"} — queue depth: ${existing.length}`,
   );
@@ -205,12 +236,13 @@ async function flushPendingToSession(repo: string | null, session: HubSessionEnt
     }
     log(`Flushing ${fresh.length} queued notification(s) for ${key} to ${session.github_username}`);
     let anyDelivered = false;
-    for (const { notification, routing } of fresh) {
+    for (const { id, notification, routing } of fresh) {
       const claimKey = claimKeyFor(routing);
       const enriched = enrichNotification(notification, claimKey, "normal");
       try {
         await sendChannelNotification(session.server, enriched);
         anyDelivered = true;
+        deletePending(id);
       } catch (err) {
         log(`Failed to flush pending notification for ${key}:`, err);
       }
@@ -251,6 +283,8 @@ setInterval(
         .join(", ");
       log(`Active sessions [${sessions.size}]: ${summary}`);
     }
+    const expired = deleteExpiredPending(config.server.pending_ttl_ms);
+    if (expired > 0) log(`Expired ${expired} pending notification(s) from SQLite`);
   },
   5 * 60 * 1000,
 ).unref();
@@ -1188,6 +1222,7 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     const dbPath =
       hubConfig.session_store_path ?? join(dirname(resolve(configPath)), "hub-session-filters.db");
     openFilterStore(dbPath);
+    restorePendingFromStore();
     log(`Session filter store: ${dbPath}`);
     log(
       `Timeouts: idle=${config.server.session_idle_ttl_ms / 60_000}m pending=${config.server.pending_ttl_ms / 60_000}m debounce=${config.server.debounce_ms}ms review_debounce=${config.server.review_debounce_ms}ms`,
@@ -1226,6 +1261,7 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     config.webhooks.allowed_authors = [authorArg as string];
     tokenMap = new Map([[bearerToken, profile]]);
     openFilterStore(join(process.cwd(), "hub-session-filters.db"));
+    restorePendingFromStore();
     log(`Session filter store: ${process.cwd()}/hub-session-filters.db`);
     log(
       `Single-user mode: no config file — all timeouts use defaults (idle=30m, pending=120m). Use --config to customise.`,

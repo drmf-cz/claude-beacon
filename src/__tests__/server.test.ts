@@ -487,7 +487,7 @@ describe("buildReviewNotification", () => {
       },
     ];
     const result = buildReviewNotification(events, meta);
-    expect(result.summary).toContain("Act immediately");
+    expect(result.summary).toContain("WAIT for explicit user approval");
     expect(result.summary).toContain("pr-comment-response");
   });
 
