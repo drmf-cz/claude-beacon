@@ -337,6 +337,15 @@ code_style: ""
 #
 #       # Per-user instruction overrides — replaces the global behavior config for
 #       # this user's events. Any key omitted falls back to the global config.
+#       # Auto-register filter on connect — no set_filter call needed.
+#       # Useful for daemon / catch-all sessions.
+#       # repo: null   = all repositories
+#       # branch: null = all branches in the repo
+#       default_filter:
+#         repo: "keboola/mcp-server"
+#         branch: null      # catch-all: receives all branch notifications
+#         label: "daemon"   # shown in conflict messages
+#
 #       behavior:
 #         code_style: |
 #           TypeScript strict mode. No any. Prefer const. Functional style.

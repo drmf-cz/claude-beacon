@@ -449,4 +449,33 @@ hub:
 `);
     expect(() => loadHubConfig(path)).toThrow(/too short/i);
   });
+
+  it("parses default_filter when present", () => {
+    const path = writeTempConfig(`
+hub:
+  users:
+    - github_username: martinv
+      token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      default_filter:
+        repo: "keboola/mcp-server"
+        branch: null
+        label: "daemon"
+`);
+    const { hub } = loadHubConfig(path);
+    const user = hub.users[0];
+    expect(user?.default_filter?.repo).toBe("keboola/mcp-server");
+    expect(user?.default_filter?.branch).toBeNull();
+    expect(user?.default_filter?.label).toBe("daemon");
+  });
+
+  it("leaves default_filter undefined when absent", () => {
+    const path = writeTempConfig(`
+hub:
+  users:
+    - github_username: martinv
+      token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+`);
+    const { hub } = loadHubConfig(path);
+    expect(hub.users[0]?.default_filter).toBeUndefined();
+  });
 });

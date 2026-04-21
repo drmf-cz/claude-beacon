@@ -40,7 +40,8 @@ import type { NotifyFn, RoutingKey } from "./server.js";
 import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
 import type { CINotification } from "./types.js";
 
-const log = (...args: unknown[]) => console.error("[github-ci:hub]", ...args);
+const log = (...args: unknown[]) =>
+  console.error(`[github-ci:hub] ${new Date().toISOString().slice(11, 23)}`, ...args);
 
 // ── .env loader ───────────────────────────────────────────────────────────────
 // Bun auto-loads .env only from the working directory. When running the compiled
@@ -300,6 +301,8 @@ setInterval(
             log(`Stale claim cleared: ${k} (session was idle)`);
           }
         }
+        // Close transport so Claude Code gets a clean disconnect and reconnects.
+        session.transport.close().catch(() => {});
       }
     }
   },
@@ -833,13 +836,14 @@ function createHubSession(profile: HubUserProfile): {
     eventStore: new NotificationEventStore(),
     onsessioninitialized: (id) => {
       sessionId = id;
+      const df = profile.default_filter;
       entry = {
         server,
         transport,
         github_username: profile.github_username,
-        repo: null,
-        branch: null,
-        label: null,
+        repo: df?.repo ?? null,
+        branch: df?.branch ?? null,
+        label: df?.label ? df.label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null,
         worktree_path: null,
         lastActivityAt: Date.now(),
       };
@@ -848,6 +852,21 @@ function createHubSession(profile: HubUserProfile): {
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );
+      if (df) {
+        log(`Auto-filter applied: ${df.repo ?? "*"}@${df.branch ?? "*"}`);
+        const capturedEntry = entry;
+        const repoAllowed =
+          df.repo === null ||
+          config.webhooks.allowed_repos.length === 0 ||
+          config.webhooks.allowed_repos.includes(df.repo);
+        if (repoAllowed) {
+          flushPendingToSession(df.repo ?? null, capturedEntry)
+            .then(() => sendStatusLine(server, buildStatusText(capturedEntry)))
+            .catch((err) => log("Auto-filter flush failed:", err));
+        } else {
+          sendStatusLine(server, buildStatusText(capturedEntry)).catch(() => {});
+        }
+      }
     },
     onsessionclosed: (id) => {
       const session = sessions.get(id);
@@ -884,6 +903,7 @@ const routeToSessions: NotifyFn = async (
       const enriched = enrichNotification(notification, claimKey, "owned");
       try {
         await sendChannelNotification(ownerSession.server, enriched);
+        ownerSession.lastActivityAt = Date.now();
         log(
           `Routed to claim owner ${existing.label ?? existing.sessionId.slice(0, 8)}: ${claimKey}`,
         );
@@ -917,6 +937,7 @@ const routeToSessions: NotifyFn = async (
   for (const session of recipients) {
     try {
       await sendChannelNotification(session.server, enriched);
+      session.lastActivityAt = Date.now();
       sent++;
     } catch (err) {
       log("Failed to push notification to session:", err);
@@ -948,6 +969,41 @@ function maybeStartFallback(
 // ── MCP HTTP server ───────────────────────────────────────────────────────────
 
 const MCP_PORT = Number(process.env.MCP_PORT ?? 9444);
+
+// Inject SSE comment pings every 25 s so reverse proxies don't close idle streams.
+// Proxies (nginx default: 60 s) interpret silence as a dead connection.
+const SSE_PING_INTERVAL_MS = 25_000;
+
+function withSsePing(response: Response): Response {
+  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    return response;
+  }
+  const encoder = new TextEncoder();
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      pingTimer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          clearInterval(pingTimer);
+          pingTimer = undefined;
+        }
+      }, SSE_PING_INTERVAL_MS);
+    },
+    flush() {
+      clearInterval(pingTimer);
+      pingTimer = undefined;
+    },
+  });
+
+  return new Response(response.body.pipeThrough(transform), {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
 
 function startMcpServer(): void {
   Bun.serve({
@@ -1009,7 +1065,7 @@ function startMcpServer(): void {
           return new Response("Forbidden", { status: 403 });
         }
         session.lastActivityAt = Date.now();
-        return session.transport.handleRequest(req);
+        return withSsePing(await session.transport.handleRequest(req));
       }
 
       if (req.method !== "POST") {
@@ -1018,7 +1074,7 @@ function startMcpServer(): void {
 
       const { server, transport } = createHubSession(profile);
       await server.connect(transport);
-      return transport.handleRequest(req);
+      return withSsePing(await transport.handleRequest(req));
     },
   });
   log(`MCP HTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
