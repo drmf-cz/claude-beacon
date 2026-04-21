@@ -20,6 +20,23 @@ export interface ServerConfig {
    * Default: 10 minutes.
    */
   claim_ttl_ms: number;
+  /**
+   * How long a hub session can be idle before it is evicted from memory (milliseconds).
+   * Idle = no MCP requests received from the Claude Code client.
+   * Increase this if your Claude Code sessions disconnect and reconnect frequently
+   * and you want the hub to retain their registrations longer.
+   * Default: 30 minutes.
+   */
+  session_idle_ttl_ms: number;
+  /**
+   * How long a queued notification is retained waiting for a matching session (milliseconds).
+   * Notifications are queued when no session is registered for the target repo/branch.
+   * They are delivered as soon as a session calls set_filter with a matching repo.
+   * Increase this if you start Claude Code sessions infrequently and want to receive
+   * notifications that arrived while no session was running.
+   * Default: 2 hours.
+   */
+  pending_ttl_ms: number;
 }
 
 export interface WebhooksConfig {
@@ -406,6 +423,8 @@ export const DEFAULT_CONFIG: Config = {
     max_events_per_window: 50,
     main_branches: ["main", "master"],
     claim_ttl_ms: 10 * 60 * 1000,
+    session_idle_ttl_ms: 30 * 60 * 1000,
+    pending_ttl_ms: 2 * 60 * 60 * 1000,
   },
   webhooks: {
     allowed_authors: [],

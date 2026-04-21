@@ -233,7 +233,6 @@ interface PendingNotification {
 }
 
 const pendingByRepo = new Map<string, PendingNotification[]>();
-const PENDING_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_PENDING_REPOS = 100;
 const MAX_PENDING_PER_REPO = 50;
 
@@ -245,7 +244,7 @@ function enqueuePending(routing: RoutingKey, notification: CINotification): void
     if (oldest !== undefined) pendingByRepo.delete(oldest);
   }
   const existing = (pendingByRepo.get(key) ?? []).filter(
-    (n) => now - n.receivedAt < PENDING_TTL_MS,
+    (n) => now - n.receivedAt < config.server.pending_ttl_ms,
   );
   if (existing.length >= MAX_PENDING_PER_REPO) existing.shift();
   existing.push({ notification, routing, receivedAt: now });
@@ -261,7 +260,7 @@ async function flushPendingToSession(repo: string | null, session: HubSessionEnt
   for (const key of keys) {
     const pending = pendingByRepo.get(key);
     if (!pending || pending.length === 0) continue;
-    const fresh = pending.filter((n) => now - n.receivedAt < PENDING_TTL_MS);
+    const fresh = pending.filter((n) => now - n.receivedAt < config.server.pending_ttl_ms);
     if (fresh.length === 0) {
       pendingByRepo.delete(key);
       continue;
@@ -284,17 +283,16 @@ async function flushPendingToSession(repo: string | null, session: HubSessionEnt
 
 // ── Session TTL ───────────────────────────────────────────────────────────────
 
-const SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
-
 setInterval(
   () => {
+    const ttl = config.server.session_idle_ttl_ms;
     const now = Date.now();
     for (const [id, session] of sessions) {
-      if (now - session.lastActivityAt > SESSION_IDLE_TTL_MS) {
+      if (now - session.lastActivityAt > ttl) {
         removeUserSession(session.github_username, id);
         sessions.delete(id);
         log(
-          `Session ${id.slice(0, 8)} (${session.github_username}) idle >30 min — removed (total: ${sessions.size})`,
+          `Session ${id.slice(0, 8)} (${session.github_username}) idle >${Math.round(ttl / 60_000)}m — removed (total: ${sessions.size})`,
         );
         for (const [k, c] of workClaims) {
           if (c.sessionId === id) {
