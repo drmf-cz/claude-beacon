@@ -746,6 +746,22 @@ function createHubSession(profile: HubUserProfile): {
   );
 
   server.tool(
+    "ping",
+    "No-op keep-alive. Call this every 15–20 minutes when idle to prevent hub session eviction. Also useful to confirm the MCP connection is alive.",
+    {},
+    async () => {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `pong — session ${sessionId.slice(0, 8)} alive, user ${profile.github_username}`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
     "get_status",
     [
       "Return a full diagnostic snapshot of this hub session: current filter,",
@@ -811,6 +827,22 @@ function createHubSession(profile: HubUserProfile): {
         review_debounce_ms: config.server.review_debounce_ms,
       };
 
+      // ── Hub-wide scope ────────────────────────────────────────────────────
+      // allowed_repos: empty = accept all repos; non-empty = only listed repos
+      // pending_queue: events that arrived when NO session matched their repo/branch.
+      //   They wait here until a session calls set_filter with a matching repo.
+      //   Events delivered to an active session never appear here.
+      const hubScope = {
+        allowed_repos:
+          config.webhooks.allowed_repos.length > 0 ? config.webhooks.allowed_repos : ["*"],
+        allowed_authors: config.webhooks.allowed_authors,
+        allowed_events:
+          config.webhooks.allowed_events.length > 0 ? config.webhooks.allowed_events : ["*"],
+        pending_queue_note:
+          "Shows events that matched no active session at arrival time. " +
+          "Your matched events are delivered directly and never appear here.",
+      };
+
       const result = {
         session: {
           id: sessionId.slice(0, 8),
@@ -821,6 +853,7 @@ function createHubSession(profile: HubUserProfile): {
         active_claims: myClaims,
         pending_queue: pendingQueue,
         all_sessions: allSessions,
+        hub_scope: hubScope,
         config: timeouts,
       };
 
@@ -1104,7 +1137,7 @@ const MCP_PORT = Number(process.env.MCP_PORT ?? 9444);
 // Proxies (nginx default: 60 s) interpret silence as a dead connection.
 const SSE_PING_INTERVAL_MS = 25_000;
 
-function withSsePing(response: Response): Response {
+function withSsePing(response: Response, onPing?: () => void): Response {
   if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
     return response;
   }
@@ -1116,6 +1149,7 @@ function withSsePing(response: Response): Response {
       pingTimer = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": ping\n\n"));
+          onPing?.();
         } catch {
           clearInterval(pingTimer);
           pingTimer = undefined;
@@ -1195,7 +1229,9 @@ function startMcpServer(): void {
           return new Response("Forbidden", { status: 403 });
         }
         session.lastActivityAt = Date.now();
-        return withSsePing(await session.transport.handleRequest(req));
+        return withSsePing(await session.transport.handleRequest(req), () => {
+          session.lastActivityAt = Date.now();
+        });
       }
 
       if (req.method !== "POST") {

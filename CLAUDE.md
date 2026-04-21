@@ -25,6 +25,16 @@ This registers the session with the running mux server so CI/PR notifications ar
 
 Call `set_filter` again after checking out a different branch or entering/leaving a worktree.
 
+## Session keep-alive — REQUIRED when idle
+
+The hub evicts sessions that are idle (no MCP tool calls) for longer than `session_idle_ttl_ms` (default 2 hours). When you are waiting for events and not actively working, call `ping()` every 15–20 minutes to reset the idle timer:
+
+```
+ping()
+```
+
+Use `get_status()` at any time to inspect your current filter, see what's in the pending queue (events that arrived while no session was registered for that repo/branch), and check which other sessions are active.
+
 ## CI failure response — REQUIRED order of operations
 
 When a CI failure notification arrives for a feature branch, **always rebase before diagnosing or fixing**, no matter how obvious the failure looks. Skipping the rebase when the fix seems clear is the #1 cause of stale-base bugs and follow-on version conflicts.
