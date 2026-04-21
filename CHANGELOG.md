@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.14.0] — 2026-04-21
+
+### Features
+- **Catch-all grant** (`src/hub.ts`): only ONE session per user can hold the catch-all grant at a time (first-claim-wins). `set_filter(branch=null)` claims the grant; switching to a specific branch releases it automatically. A new `release_catchall` tool allows explicit release. Stale holders (idle > `session_idle_ttl_ms / 2`) can be evicted by a new claimer. Grant is auto-released on disconnect. `get_status` now shows `catchall_grant: true/false` per session.
+- **`get_behavior` tool** (`src/hub.ts`): lists effective behavior configuration per event type with source annotation (`[SQLite]` / `[config.yaml]` / `[global default]`), including instruction previews. Allows inspecting and auditing the current merged config before adjusting with `set_behavior`.
+- **Full config reference** (`config.example.yaml`): documented all behavior fields under `hub.users[N].behavior` (all event types with all fields and placeholders), and catch-all grant semantics under `default_filter`.
+
+### Fix
+- **`check_run` / `check_suite` / `workflow_job` branch extraction** (`src/server.ts`, `src/types.ts`): these CI events previously fell through with `branch: null`, causing all repo sessions to receive them regardless of branch filter. Now extract `head_branch` from the webhook payload so events are routed to the correct branch session.
+- **`on_pr_review` instruction** (`src/config.ts`): the default instruction now outputs the response table in the session (not to GitHub), explicitly says "STOP" before the approval gate, and references the skill by name rather than `/{skill}` (which was being auto-invoked instead of shown as text).
+- **`set_behavior` persistence** (`src/hub.ts`, `src/store.ts`): behavior set via `set_behavior` is now persisted to SQLite (`session_behaviors` table) and restored automatically on session reconnect.
+
 ## [1.13.0] — 2026-04-21
 
 ### Features

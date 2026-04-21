@@ -190,6 +190,7 @@ type MinimalSession = {
   label: string | null;
   worktree_path: string | null;
   lastActivityAt: number;
+  catchall: boolean;
   server: never;
   transport: never;
 };
@@ -199,6 +200,7 @@ function makeSession(
   repo: string | null,
   branch: string | null,
   id: string,
+  catchall = false,
 ): [string, MinimalSession] {
   return [
     id,
@@ -209,6 +211,7 @@ function makeSession(
       label: null,
       worktree_path: null,
       lastActivityAt: Date.now(),
+      catchall,
       server: {} as never,
       transport: {} as never,
     },
@@ -253,7 +256,7 @@ describe("selectHubRecipients — Tier 0 (author match)", () => {
   });
 
   it("does NOT use a specific-branch session as catch-all for a different branch", () => {
-    // Tier 3 only matches branch=null sessions. A session filtered to "main" should
+    // Tier 3 only matches sessions with catchall=true. A session filtered to "main" should
     // not receive events for "feat/new" — the user opted into one branch, not the repo.
     const sessMap = new Map([makeSession("alice", "org/repo", "main", "s1")]);
     const userMap = new Map([["alice", new Set(["s1"])]]);
@@ -267,10 +270,10 @@ describe("selectHubRecipients — Tier 0 (author match)", () => {
     expect(recipients.length).toBe(0);
   });
 
-  it("null-branch session matches any branch via Tier 2 (branch wildcard)", () => {
-    // branch=null is the wildcard: it matches any routing.branch in Tier 1+2, so
+  it("catch-all session (catchall=true) matches any branch via Tier 2", () => {
+    // catchall=true is the wildcard: it matches any routing.branch in Tier 1+2, so
     // the mode is "normal" (Tier 2 match), not "catchall" (Tier 3).
-    const sessMap = new Map([makeSession("alice", "org/repo", null, "s1")]);
+    const sessMap = new Map([makeSession("alice", "org/repo", null, "s1", true)]);
     const userMap = new Map([["alice", new Set(["s1"])]]);
     const routing: RoutingKey = {
       repo: "org/repo",
@@ -282,6 +285,21 @@ describe("selectHubRecipients — Tier 0 (author match)", () => {
     expect(recipients.length).toBe(1);
     expect(recipients[0]?.github_username).toBe("alice");
     expect(mode).toBe("normal");
+  });
+
+  it("null-branch session WITHOUT catchall grant does NOT match other branches", () => {
+    // branch=null alone is no longer a wildcard; catchall=false means this session
+    // only receives events where routing.branch is also null.
+    const sessMap = new Map([makeSession("alice", "org/repo", null, "s1", false)]);
+    const userMap = new Map([["alice", new Set(["s1"])]]);
+    const routing: RoutingKey = {
+      repo: "org/repo",
+      branch: "feat/new",
+      pr_author: "alice",
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test cast
+    const { recipients } = selectHubRecipients(routing, sessMap as any, userMap);
+    expect(recipients.length).toBe(0);
   });
 
   it("returns empty array when no sessions at all", () => {

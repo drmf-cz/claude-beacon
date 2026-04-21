@@ -125,6 +125,8 @@ interface HubSessionEntry {
   lastActivityAt: number;
   /** Per-session behavior override set via the set_behavior MCP tool. Highest priority. */
   behavior?: Partial<HubUserBehavior>;
+  /** Whether this session holds the catch-all grant for its user (receives events matching no specific branch). */
+  catchall: boolean;
 }
 
 const sessions = new Map<string, HubSessionEntry>();
@@ -145,6 +147,35 @@ function removeUserSession(username: string, sessionId: string): void {
   if (!ids) return;
   ids.delete(sessionId);
   if (ids.size === 0) userSessions.delete(username);
+}
+
+// ── Catch-all grants ──────────────────────────────────────────────────────────
+
+/** One catch-all grant per github_username → sessionId (first-claim-wins). */
+const catchallGrants = new Map<string, string>();
+
+function tryCatchallClaim(
+  username: string,
+  sessionId: string,
+  idleTtlMs: number,
+): "granted" | "stolen" | "denied" {
+  const currentId = catchallGrants.get(username);
+  if (!currentId || currentId === sessionId) {
+    catchallGrants.set(username, sessionId);
+    return "granted";
+  }
+  const holder = sessions.get(currentId);
+  // Steal the grant when the current holder is gone or has been idle for over half the TTL
+  if (!holder || Date.now() - holder.lastActivityAt > idleTtlMs / 2) {
+    if (holder) holder.catchall = false;
+    catchallGrants.set(username, sessionId);
+    return "stolen";
+  }
+  return "denied";
+}
+
+function releaseCatchallGrant(username: string, sessionId: string): void {
+  if (catchallGrants.get(username) === sessionId) catchallGrants.delete(username);
 }
 
 // ── Work-context claims ───────────────────────────────────────────────────────
@@ -338,10 +369,11 @@ export function selectHubRecipients(
           .filter((s): s is HubSessionEntry => s !== undefined)
       : [...allSessions.values()];
 
-  // Tier 1+2: repo + branch match within candidate pool
+  // Tier 1+2: repo + branch match within candidate pool.
+  // catch-all sessions (catchall===true) also participate here and receive everything for the repo.
   const primary = candidatePool.filter(
     (s) =>
-      forRepo(s) && (s.branch === null || routing.branch === null || s.branch === routing.branch),
+      forRepo(s) && (s.catchall === true || routing.branch === null || s.branch === routing.branch),
   );
 
   if (primary.length > 0) {
@@ -352,14 +384,12 @@ export function selectHubRecipients(
     return { recipients: sorted, mode: "normal" };
   }
 
-  // Tier 3: catch-all — only sessions that opted into null-branch monitoring.
-  // Sessions with a specific branch filter should NOT receive events for other branches
-  // as a catch-all: they registered interest in one branch, not the whole repo.
-  const forCatchall = (s: HubSessionEntry) => forRepo(s) && s.branch === null;
+  // Tier 3: catch-all — only sessions that hold the catch-all grant.
+  const forCatchall = (s: HubSessionEntry) => forRepo(s) && s.catchall === true;
   const catchall = candidatePool.filter(forCatchall);
   if (catchall.length > 0) return { recipients: catchall, mode: "catchall" };
 
-  // If Tier 0 had candidates but none matched — fall through to null-branch sessions globally
+  // If Tier 0 had candidates but none matched — fall through to catch-all sessions globally
   if (authorIds !== null && candidatePool.length > 0) {
     return {
       recipients: [...allSessions.values()].filter(forCatchall),
@@ -616,7 +646,26 @@ function createHubSession(profile: HubUserProfile): {
         ),
     },
     async ({ repo, branch, label, worktree_path }) => {
+      let catchallNote = "";
       if (entry) {
+        // Manage catch-all grant on branch transition
+        if (branch === null) {
+          const result = tryCatchallClaim(
+            profile.github_username,
+            sessionId,
+            config.server.session_idle_ttl_ms,
+          );
+          entry.catchall = result !== "denied";
+          if (result === "granted") catchallNote = " Catch-all grant: granted.";
+          else if (result === "stolen")
+            catchallNote = " Catch-all grant: stolen from idle session.";
+          else catchallNote = " Catch-all grant: denied — another active session holds it.";
+        } else if (entry.catchall) {
+          releaseCatchallGrant(profile.github_username, sessionId);
+          entry.catchall = false;
+          catchallNote = " Catch-all grant released (specific branch registered).";
+        }
+
         entry.repo = repo;
         entry.branch = branch;
         entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
@@ -643,7 +692,7 @@ function createHubSession(profile: HubUserProfile): {
         content: [
           {
             type: "text" as const,
-            text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.`,
+            text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.${catchallNote}`,
           },
         ],
       };
@@ -720,6 +769,7 @@ function createHubSession(profile: HubUserProfile): {
         repo: s.repo ?? "*",
         branch: s.branch ?? "*",
         label: s.label ?? null,
+        catchall_grant: s.catchall,
         idle: `${Math.round((now - s.lastActivityAt) / 60_000)}m`,
         is_me: id === sessionId,
       }));
@@ -754,6 +804,7 @@ function createHubSession(profile: HubUserProfile): {
           user: profile.github_username,
           idle: `${idleMin}m`,
           filter,
+          catchall_grant: entry?.catchall ?? false,
         },
         active_claims: myClaims,
         pending_queue: pendingQueue,
@@ -812,6 +863,101 @@ function createHubSession(profile: HubUserProfile): {
           },
         ],
       };
+    },
+  );
+
+  server.tool(
+    "release_catchall",
+    "Release the catch-all grant so another session can claim it. Use when you no longer want to receive all events for this repo (e.g. before setting a specific branch filter, or on cleanup).",
+    {},
+    async () => {
+      if (!entry?.catchall) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "not_holder — this session does not hold the catch-all grant",
+            },
+          ],
+        };
+      }
+      releaseCatchallGrant(profile.github_username, sessionId);
+      entry.catchall = false;
+      log(`Catch-all released by ${profile.github_username} (${sessionId.slice(0, 8)})`);
+      if (entry) await sendStatusLine(server, buildStatusText(entry));
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "released — catch-all grant is now available for another session to claim",
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
+    "get_behavior",
+    "Show the effective behavior configuration for this session: per-event settings with source annotation (SQLite / config.yaml / global default). Use to inspect or audit current behavior before using set_behavior to adjust.",
+    {},
+    async () => {
+      const resolvedConfig = resolveUserConfig(config, profile, entry?.behavior);
+
+      const sqliteBehavior = entry?.behavior ?? null;
+      const profileBehavior = profile.behavior ?? null;
+
+      type BehaviorKey = keyof Omit<HubUserBehavior, "code_style">;
+
+      function sourceFor(key: BehaviorKey | "code_style"): string {
+        if (sqliteBehavior && key in sqliteBehavior) return "SQLite";
+        if (profileBehavior && key in profileBehavior) return "config.yaml";
+        return "global default";
+      }
+
+      const beh = resolvedConfig.behavior;
+      const lines: string[] = [
+        `Effective behavior for @${profile.github_username}`,
+        "Source priority: [SQLite] > [config.yaml] > [global default]",
+        "",
+      ];
+
+      function addEvent(label: string, key: BehaviorKey): void {
+        const src = sourceFor(key);
+        const val = beh[key] as unknown as Record<string, unknown> | undefined;
+        if (!val || typeof val !== "object") return;
+        const props = Object.entries(val)
+          .filter(([k]) => k !== "instruction")
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+          .join("  ");
+        lines.push(`${label}  [${src}]${props ? `  ${props}` : ""}`);
+        if (typeof val.instruction === "string") {
+          const instr = val.instruction;
+          const preview = instr.slice(0, 120).replace(/\n/g, " ↵ ");
+          lines.push(`  Instruction: ${preview}${instr.length > 120 ? "…" : ""}`);
+        }
+        lines.push("");
+      }
+
+      addEvent("on_pr_review", "on_pr_review");
+      addEvent("on_pr_review_as_reviewer", "on_pr_review_as_reviewer");
+      addEvent("on_ci_failure_main", "on_ci_failure_main");
+      addEvent("on_ci_failure_branch", "on_ci_failure_branch");
+      addEvent("on_merge_conflict", "on_merge_conflict");
+      addEvent("on_branch_behind", "on_branch_behind");
+      addEvent("on_pr_opened", "on_pr_opened");
+      addEvent("on_pr_approved", "on_pr_approved");
+      addEvent("on_dependabot_alert", "on_dependabot_alert");
+      addEvent("on_code_scanning_alert", "on_code_scanning_alert");
+
+      if (resolvedConfig.code_style) {
+        const src = sourceFor("code_style");
+        const cs = resolvedConfig.code_style;
+        lines.push(`code_style  [${src}]`);
+        lines.push(`  ${cs.slice(0, 80)}${cs.length > 80 ? "…" : ""}`);
+        lines.push("");
+      }
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     },
   );
 
@@ -904,9 +1050,21 @@ function createHubSession(profile: HubUserProfile): {
         label: effectiveLabel,
         worktree_path: effectivePath,
         lastActivityAt: Date.now(),
+        catchall: false,
       };
       sessions.set(id, entry);
       addUserSession(profile.github_username, id);
+
+      // Auto-claim catch-all grant when reconnecting with a null branch
+      if (effectiveBranch === null) {
+        const claimResult = tryCatchallClaim(
+          profile.github_username,
+          id,
+          config.server.session_idle_ttl_ms,
+        );
+        entry.catchall = claimResult !== "denied";
+        log(`Catch-all claim on connect: ${profile.github_username} → ${claimResult}`);
+      }
 
       const source = pf ? "persisted (unique)" : df ? "default_filter" : "none";
       log(
@@ -945,7 +1103,13 @@ function createHubSession(profile: HubUserProfile): {
     },
     onsessionclosed: (id) => {
       const session = sessions.get(id);
-      if (session) removeUserSession(session.github_username, id);
+      if (session) {
+        removeUserSession(session.github_username, id);
+        if (session.catchall) {
+          releaseCatchallGrant(session.github_username, id);
+          log(`Catch-all grant released on disconnect: ${session.github_username}`);
+        }
+      }
       sessions.delete(id);
       for (const [k, c] of workClaims) {
         if (c.sessionId === id) {
