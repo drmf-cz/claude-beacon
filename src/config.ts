@@ -37,6 +37,14 @@ export interface ServerConfig {
    * Default: 2 hours.
    */
   pending_ttl_ms: number;
+  /**
+   * Debounce window for PR review notifications (milliseconds).
+   * GitHub delivers review events one at a time; this window batches events from the
+   * same review session into a single notification before dispatching.
+   * Separate from debounce_ms so reviews get a longer window than CI notifications.
+   * Default: 60 seconds.
+   */
+  review_debounce_ms: number;
 }
 
 export interface WebhooksConfig {
@@ -230,8 +238,14 @@ export interface BehaviorConfig {
   on_ci_failure_main: CIFailureBehavior;
   /** Behaviour when a CI run fails on a feature branch. */
   on_ci_failure_branch: CIFailureBehavior;
-  /** Behaviour when a PR review or comment arrives. */
+  /** Behaviour when a PR review or comment arrives on a PR you AUTHORED. */
   on_pr_review: PRReviewBehavior;
+  /**
+   * Behaviour when a PR review notification is delivered to a session whose user
+   * is NOT the PR author (i.e. the session user is a reviewer/contributor, not the author).
+   * Hub-only: in mux mode all sessions are treated as authors.
+   */
+  on_pr_review_as_reviewer: PRReviewBehavior;
   /** Behaviour when a PR has merge conflicts (mergeable_state=dirty). */
   on_merge_conflict: PRStateBehavior;
   /** Behaviour when a PR is behind its base branch (mergeable_state=behind). */
@@ -267,7 +281,12 @@ export interface Config {
  */
 export type HubSkillMap = Partial<
   Record<
-    "on_pr_review" | "on_ci_failure" | "on_merge_conflict" | "on_pr_opened" | "on_pr_approved",
+    | "on_pr_review"
+    | "on_pr_review_as_reviewer"
+    | "on_ci_failure"
+    | "on_merge_conflict"
+    | "on_pr_opened"
+    | "on_pr_approved",
     string
   >
 >;
@@ -304,6 +323,7 @@ export interface HubUserBehavior {
    */
   code_style?: string;
   on_pr_review?: Partial<PRReviewBehavior>;
+  on_pr_review_as_reviewer?: Partial<PRReviewBehavior>;
   on_ci_failure_main?: Partial<CIFailureBehavior>;
   on_ci_failure_branch?: Partial<CIFailureBehavior>;
   on_merge_conflict?: Partial<PRStateBehavior>;
@@ -445,6 +465,7 @@ export const DEFAULT_CONFIG: Config = {
     claim_ttl_ms: 10 * 60 * 1000,
     session_idle_ttl_ms: 30 * 60 * 1000,
     pending_ttl_ms: 2 * 60 * 60 * 1000,
+    review_debounce_ms: 60_000,
   },
   webhooks: {
     allowed_authors: [],
@@ -494,6 +515,21 @@ export const DEFAULT_CONFIG: Config = {
         "2. Read full comments: gh pr view {pr_number} --repo {repo} --comments",
         "3. Apply fixes and commit",
         "4. Use the {skill} skill to post all replies in one shot",
+      ].join("\n"),
+    },
+    on_pr_review_as_reviewer: {
+      skill: "review-pr",
+      use_worktree: false,
+      instruction: [
+        "You are a PR REVIEWER on PR #{pr_number} in {repo} — you did NOT author this PR.",
+        "Do NOT modify any code. Do NOT post any comments yet.",
+        "1. Call claim_notification first (see claim block below)",
+        "2. Read the full PR context:",
+        "   gh pr view {pr_number} --repo {repo} --comments",
+        "   gh pr diff {pr_number} --repo {repo}",
+        "3. For each comment thread, draft a proposed response",
+        "4. Enter plan mode and present your proposed review responses to the user for approval",
+        "Wait for explicit user approval before posting anything.",
       ].join("\n"),
     },
     on_merge_conflict: {

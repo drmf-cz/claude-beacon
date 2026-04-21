@@ -266,17 +266,29 @@ export function buildReviewNotification(
     lines.push("", "── Code style guidelines ──", config.code_style);
   }
 
-  const behavior = config.behavior.on_pr_review;
-  const instruction = interpolate(behavior.instruction, {
-    skill: behavior.skill,
-    worktree_preamble: buildWorktreePreamble(behavior.use_worktree),
-    pr_number: String(meta.prNumber),
-    repo: meta.repo,
-  });
-  lines.push("", ...instruction.split("\n"));
+  const buildInstruction = (behavior: {
+    skill: string;
+    use_worktree: boolean;
+    instruction: string;
+  }) =>
+    interpolate(behavior.instruction, {
+      skill: behavior.skill,
+      worktree_preamble: buildWorktreePreamble(behavior.use_worktree),
+      pr_number: String(meta.prNumber),
+      repo: meta.repo,
+    });
+
+  // Author summary: used when the receiving session's user is the PR author
+  const authorInstruction = buildInstruction(config.behavior.on_pr_review);
+  const authorLines = [...lines, "", ...authorInstruction.split("\n")];
+
+  // Reviewer summary: used when the receiving session's user is NOT the PR author
+  const reviewerInstruction = buildInstruction(config.behavior.on_pr_review_as_reviewer);
+  const reviewerLines = [...lines, "", ...reviewerInstruction.split("\n")];
 
   return {
-    summary: lines.join("\n"),
+    summary: authorLines.join("\n"),
+    reviewer_summary: reviewerLines.join("\n"),
     meta: {
       source: "github-ci",
       event: "pr_review",
@@ -1510,7 +1522,7 @@ function handleParsedReviewEvent(
       }
     },
     {
-      debounceMs: config.server.debounce_ms,
+      debounceMs: config.server.review_debounce_ms,
       cooldownMs: config.server.cooldown_ms,
       maxEvents: config.server.max_events_per_window,
     },

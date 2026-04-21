@@ -371,13 +371,19 @@ export function selectHubRecipients(
     return { recipients: sorted, mode: "normal" };
   }
 
-  // Tier 3: catch-all within candidate pool
-  const catchall = candidatePool.filter(forRepo);
+  // Tier 3: catch-all — only sessions that opted into null-branch monitoring.
+  // Sessions with a specific branch filter should NOT receive events for other branches
+  // as a catch-all: they registered interest in one branch, not the whole repo.
+  const forCatchall = (s: HubSessionEntry) => forRepo(s) && s.branch === null;
+  const catchall = candidatePool.filter(forCatchall);
   if (catchall.length > 0) return { recipients: catchall, mode: "catchall" };
 
-  // If Tier 0 had candidates but no repo match — fall through to all sessions
+  // If Tier 0 had candidates but none matched — fall through to null-branch sessions globally
   if (authorIds !== null && candidatePool.length > 0) {
-    return { recipients: [...allSessions.values()].filter(forRepo), mode: "catchall" };
+    return {
+      recipients: [...allSessions.values()].filter(forCatchall),
+      mode: "catchall",
+    };
   }
 
   return { recipients: [], mode: "catchall" };
@@ -956,8 +962,16 @@ const routeToSessions: NotifyFn = async (
   const enriched = enrichNotification(notification, claimKey, mode);
   let sent = 0;
   for (const session of recipients) {
+    // When the notification has a reviewer_summary (PR review events only), send the
+    // reviewer variant to sessions whose user is not the PR author. This lets the hub
+    // distinguish "address comments on your PR" from "help me review someone else's PR".
+    const isAuthor = routing.pr_author != null && session.github_username === routing.pr_author;
+    const toSend =
+      !isAuthor && enriched.reviewer_summary != null
+        ? { ...enriched, summary: enriched.reviewer_summary }
+        : enriched;
     try {
-      await sendChannelNotification(session.server, enriched);
+      await sendChannelNotification(session.server, toSend);
       session.lastActivityAt = Date.now();
       sent++;
     } catch (err) {

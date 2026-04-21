@@ -252,8 +252,25 @@ describe("selectHubRecipients — Tier 0 (author match)", () => {
     expect(recipients[0]?.github_username).toBe("alice");
   });
 
-  it("uses catch-all within user sessions when no branch match", () => {
+  it("does NOT use a specific-branch session as catch-all for a different branch", () => {
+    // Tier 3 only matches branch=null sessions. A session filtered to "main" should
+    // not receive events for "feat/new" — the user opted into one branch, not the repo.
     const sessMap = new Map([makeSession("alice", "org/repo", "main", "s1")]);
+    const userMap = new Map([["alice", new Set(["s1"])]]);
+    const routing: RoutingKey = {
+      repo: "org/repo",
+      branch: "feat/new",
+      pr_author: "alice",
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test cast
+    const { recipients } = selectHubRecipients(routing, sessMap as any, userMap);
+    expect(recipients.length).toBe(0);
+  });
+
+  it("null-branch session matches any branch via Tier 2 (branch wildcard)", () => {
+    // branch=null is the wildcard: it matches any routing.branch in Tier 1+2, so
+    // the mode is "normal" (Tier 2 match), not "catchall" (Tier 3).
+    const sessMap = new Map([makeSession("alice", "org/repo", null, "s1")]);
     const userMap = new Map([["alice", new Set(["s1"])]]);
     const routing: RoutingKey = {
       repo: "org/repo",
@@ -264,7 +281,7 @@ describe("selectHubRecipients — Tier 0 (author match)", () => {
     const { recipients, mode } = selectHubRecipients(routing, sessMap as any, userMap);
     expect(recipients.length).toBe(1);
     expect(recipients[0]?.github_username).toBe("alice");
-    expect(mode).toBe("catchall");
+    expect(mode).toBe("normal");
   });
 
   it("returns empty array when no sessions at all", () => {

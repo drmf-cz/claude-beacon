@@ -1,5 +1,11 @@
 export interface CINotification {
   summary: string;
+  /**
+   * Alternate summary for hub sessions where the receiving user is a PR reviewer
+   * (not the PR author). Only set for PR review notifications. Hub routing sends
+   * this to reviewer sessions and `summary` to author sessions.
+   */
+  reviewer_summary?: string;
   meta: Record<string, string>;
 }
 

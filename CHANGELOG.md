@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.0] — 2026-04-21
+
+### Features
+- **PR review workflow split** (`src/hub.ts`, `src/config.ts`, `src/server.ts`): hub now routes PR review events differently depending on whether the receiving session belongs to the PR author or a reviewer:
+  - **Author sessions** receive the existing `on_pr_review` instruction (read comments → fix code → push → reply).
+  - **Reviewer sessions** (session `github_username` ≠ PR author) receive a new `on_pr_review_as_reviewer` instruction — produces a plan of proposed review responses for user approval, no code changes, no comments posted without approval.
+- **`review_debounce_ms`** (`src/config.ts`): separate debounce for PR review events (default 60 s) vs general notifications (`debounce_ms`, 30 s). Gives GitHub more time to deliver all review comments before the notification fires.
+- **Tier 3 catch-all restriction** (`src/hub.ts`): only `branch=null` sessions are eligible as catch-all recipients. Previously any repo-matched session (even with a specific branch filter) could receive events for other branches; now specific-branch sessions only receive their own branch's events.
+
+### Fix
+- `reviewer_summary` field on `CINotification` (`src/types.ts`): notifications carry both an author summary and a reviewer summary; hub routing selects the appropriate one per recipient session.
+
 ## [1.11.0] — 2026-04-21
 
 ### Fix
