@@ -416,6 +416,12 @@ export interface HubConfig {
   users: HubUserProfile[];
   /** Global fallback defaults — overridden per user via user.fallback. */
   fallback: HubFallbackConfig;
+  /**
+   * Absolute path to the SQLite file used to persist session filters across hub restarts.
+   * Default: next to the config file as "hub-session-filters.db".
+   * In --author mode: {cwd}/hub-session-filters.db.
+   */
+  session_store_path?: string;
 }
 
 const DEFAULT_HUB_FALLBACK: HubFallbackConfig = {
@@ -745,7 +751,13 @@ export function loadHubConfig(filePath: string): { config: Config; hub: HubConfi
       rawFallback.notify_via_pr_comment ?? DEFAULT_HUB_FALLBACK.notify_via_pr_comment,
   };
 
-  const hub: HubConfig = { users, fallback };
+  const session_store_path =
+    typeof rawHub.session_store_path === "string" ? rawHub.session_store_path : undefined;
+  const hub: HubConfig = {
+    users,
+    fallback,
+    ...(session_store_path !== undefined && { session_store_path }),
+  };
 
   // Also build the base config (without the hub section interfering with deepMerge)
   const { hub: _hub, ...docWithoutHub } = doc as { hub: unknown } & Record<string, unknown>;
