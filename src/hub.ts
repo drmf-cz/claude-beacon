@@ -51,9 +51,11 @@ import {
   deletePending,
   loadAllPending,
   loadUniqueFilter,
+  loadUserBehavior,
   openFilterStore,
   saveFilter,
   savePending,
+  saveUserBehavior,
 } from "./store.js";
 import type { CINotification } from "./types.js";
 
@@ -800,12 +802,13 @@ function createHubSession(profile: HubUserProfile): {
       if (entry) {
         entry.behavior = parsed as Partial<HubUserBehavior>;
       }
+      saveUserBehavior(profile.github_username, behavior_yaml);
       log(`Behavior set for @${profile.github_username} (session ${sessionId.slice(0, 8)})`);
       return {
         content: [
           {
             type: "text" as const,
-            text: "Behavior config applied for this session. Instructions will use your local overrides.",
+            text: "Behavior config applied for this session and persisted — will be restored automatically on reconnect.",
           },
         ],
       };
@@ -909,6 +912,20 @@ function createHubSession(profile: HubUserProfile): {
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );
+
+      // Restore persisted behavior (set via set_behavior tool)
+      const savedBehavior = loadUserBehavior(profile.github_username);
+      if (savedBehavior) {
+        try {
+          const parsed = parse(savedBehavior);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            entry.behavior = parsed as Partial<HubUserBehavior>;
+            log(`Restored behavior for ${profile.github_username}`);
+          }
+        } catch {
+          log(`Skipping corrupt persisted behavior for ${profile.github_username}`);
+        }
+      }
 
       if (pf !== null || df !== undefined) {
         log(`Auto-filter applied: ${effectiveRepo ?? "*"}@${effectiveBranch ?? "*"} [${source}]`);

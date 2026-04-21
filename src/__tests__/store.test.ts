@@ -8,9 +8,11 @@ import {
   deletePending,
   loadAllPending,
   loadUniqueFilter,
+  loadUserBehavior,
   openFilterStore,
   saveFilter,
   savePending,
+  saveUserBehavior,
 } from "../store.js";
 
 let testDir: string;
@@ -372,5 +374,43 @@ describe("closeFilterStore", () => {
       }),
     ).not.toThrow();
     expect(loadUniqueFilter("alice")).toBeNull();
+  });
+});
+
+describe("session behaviors: saveUserBehavior / loadUserBehavior", () => {
+  beforeEach(() => {
+    openFilterStore(join(testDir, "filters.db"));
+  });
+
+  afterEach(() => {
+    closeFilterStore();
+  });
+
+  it("returns null for unknown user", () => {
+    expect(loadUserBehavior("alice")).toBeNull();
+  });
+
+  it("saves and loads back the YAML string", () => {
+    saveUserBehavior("alice", "on_pr_review:\n  skill: custom-skill\n");
+    expect(loadUserBehavior("alice")).toBe("on_pr_review:\n  skill: custom-skill\n");
+  });
+
+  it("second save overwrites the first (upsert)", () => {
+    saveUserBehavior("alice", "first: true\n");
+    saveUserBehavior("alice", "second: true\n");
+    expect(loadUserBehavior("alice")).toBe("second: true\n");
+  });
+
+  it("no-op when store not open", () => {
+    closeFilterStore();
+    expect(() => saveUserBehavior("alice", "x: 1\n")).not.toThrow();
+    expect(loadUserBehavior("alice")).toBeNull();
+  });
+
+  it("two different users get independent rows", () => {
+    saveUserBehavior("alice", "skill: a\n");
+    saveUserBehavior("bob", "skill: b\n");
+    expect(loadUserBehavior("alice")).toBe("skill: a\n");
+    expect(loadUserBehavior("bob")).toBe("skill: b\n");
   });
 });

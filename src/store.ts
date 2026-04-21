@@ -38,7 +38,7 @@ export function openFilterStore(dbPath: string): void {
     } else {
       db.run(`CREATE TABLE IF NOT EXISTS session_filters ${FILTER_TABLE_COLUMNS}`);
     }
-    // pending_queue is additive — safe to create without bumping schema version
+    // pending_queue and session_behaviors are additive — safe to create without bumping schema version
     db.run(`CREATE TABLE IF NOT EXISTS pending_queue (
       id           TEXT PRIMARY KEY,
       repo         TEXT NOT NULL,
@@ -47,6 +47,11 @@ export function openFilterStore(dbPath: string): void {
       notification TEXT NOT NULL,
       routing      TEXT NOT NULL,
       received_at  INTEGER NOT NULL
+    )`);
+    db.run(`CREATE TABLE IF NOT EXISTS session_behaviors (
+      github_username TEXT PRIMARY KEY NOT NULL,
+      behavior_yaml   TEXT NOT NULL,
+      updated_at      INTEGER NOT NULL
     )`);
     log(`Opened at ${dbPath}`);
   } catch (err) {
@@ -193,6 +198,38 @@ export function loadUniqueFilter(github_username: string): PersistedFilter | nul
     };
   } catch (err) {
     log(`loadUniqueFilter failed for ${github_username}: ${err}`);
+    return null;
+  }
+}
+
+// ── Behavior persistence ──────────────────────────────────────────────────────
+
+/** Persist the raw behavior YAML for a user. Upserts. No-op if the store is not open. */
+export function saveUserBehavior(github_username: string, behavior_yaml: string): void {
+  if (!db) return;
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO session_behaviors (github_username, behavior_yaml, updated_at)
+       VALUES (?, ?, ?)`,
+      [github_username, behavior_yaml, Date.now()],
+    );
+  } catch (err) {
+    log(`saveUserBehavior failed for ${github_username}: ${err}`);
+  }
+}
+
+/** Return the last saved behavior YAML for a user, or null if none exists. */
+export function loadUserBehavior(github_username: string): string | null {
+  if (!db) return null;
+  try {
+    const row = db
+      .query<{ behavior_yaml: string }, [string]>(
+        "SELECT behavior_yaml FROM session_behaviors WHERE github_username = ?",
+      )
+      .get(github_username);
+    return row?.behavior_yaml ?? null;
+  } catch (err) {
+    log(`loadUserBehavior failed for ${github_username}: ${err}`);
     return null;
   }
 }
