@@ -306,6 +306,15 @@ setInterval(
         session.transport.close().catch(() => {});
       }
     }
+    if (sessions.size > 0) {
+      const summary = [...sessions.entries()]
+        .map(
+          ([id, s]) =>
+            `${id.slice(0, 8)}(${s.github_username}) ${s.repo ?? "*"}@${s.branch ?? "*"} idle=${Math.round((now - s.lastActivityAt) / 60_000)}m`,
+        )
+        .join(", ");
+      log(`Active sessions [${sessions.size}]: ${summary}`);
+    }
   },
   5 * 60 * 1000,
 ).unref();
@@ -730,6 +739,29 @@ function createHubSession(profile: HubUserProfile): {
           {
             type: "text" as const,
             text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
+    "get_filter",
+    "Return this session's current repo/branch/label/worktree_path filter. Useful for verifying set_filter was called correctly.",
+    {},
+    async () => {
+      const repo = entry?.repo ?? null;
+      const branch = entry?.branch ?? null;
+      const label = entry?.label ?? null;
+      const worktree_path = entry?.worktree_path ?? null;
+      log(
+        `get_filter → ${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"} label=${label ?? "-"} worktree=${worktree_path ?? "-"}`,
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ repo, branch, label, worktree_path }, null, 2),
           },
         ],
       };
