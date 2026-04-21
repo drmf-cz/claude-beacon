@@ -165,6 +165,11 @@ interface PendingPRReview {
   prTitle: string;
   prUrl: string;
   repo: string;
+  /** Locked to the onFire from the first event so routing key doesn't change on extension. */
+  onFire: (
+    events: ReviewEventRecord[],
+    meta: { prNumber: number; prTitle: string; prUrl: string; repo: string },
+  ) => void;
 }
 
 // Exported for testing
@@ -211,16 +216,20 @@ export function scheduleReviewNotification(
     if (existing.events.length >= maxEvents) return false; // window full
     clearTimeout(existing.timer);
     existing.events.push(event);
+    // Reuse existing.onFire (locked to the first event's routing key).
+    // Do NOT use the current call's onFire — it may have a different routing key
+    // (e.g. issue_comment has branch=null, while pull_request_review has the real branch).
     existing.timer = setTimeout(() => {
       const entry = pendingReviews.get(key);
       pendingReviews.delete(key);
       reviewCooldowns.set(key, Date.now() + cooldownMs);
-      if (entry) onFire(entry.events, prMeta);
+      if (entry) entry.onFire(entry.events, prMeta);
     }, debounceMs);
   } else {
     const entry: PendingPRReview = {
       ...prMeta,
       events: [event],
+      onFire,
       timer: setTimeout(() => {
         pendingReviews.delete(key);
         reviewCooldowns.set(key, Date.now() + cooldownMs);
