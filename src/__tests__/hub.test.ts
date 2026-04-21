@@ -130,49 +130,49 @@ describe("loadDotEnv", () => {
   });
 
   it("loads a variable that is not already set in the environment", () => {
-    delete process.env["DOTENV_TEST_PLAIN"];
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_PLAIN");
     const cfg = writeTempConfig("DOTENV_TEST_PLAIN=hello\n");
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("hello");
+    expect(process.env.DOTENV_TEST_PLAIN).toBe("hello");
   });
 
   it("does NOT overwrite an existing env var (shell exports take precedence)", () => {
-    process.env["DOTENV_TEST_PLAIN"] = "original";
+    process.env.DOTENV_TEST_PLAIN = "original";
     const cfg = writeTempConfig("DOTENV_TEST_PLAIN=should-not-win\n");
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("original");
+    expect(process.env.DOTENV_TEST_PLAIN).toBe("original");
   });
 
   it("strips surrounding double quotes from values", () => {
-    delete process.env["DOTENV_TEST_DQUOTE"];
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_DQUOTE");
     const cfg = writeTempConfig('DOTENV_TEST_DQUOTE="hello world"\n');
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_DQUOTE"]).toBe("hello world");
+    expect(process.env.DOTENV_TEST_DQUOTE).toBe("hello world");
   });
 
   it("strips surrounding single quotes from values", () => {
-    delete process.env["DOTENV_TEST_SQUOTE"];
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_SQUOTE");
     const cfg = writeTempConfig("DOTENV_TEST_SQUOTE='hello world'\n");
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_SQUOTE"]).toBe("hello world");
+    expect(process.env.DOTENV_TEST_SQUOTE).toBe("hello world");
   });
 
   it("skips comment lines and blank lines", () => {
-    delete process.env["DOTENV_TEST_COMMENT"];
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_COMMENT");
     const cfg = writeTempConfig(
       "# this is a comment\n\nDOTENV_TEST_COMMENT=value\n# another comment\n",
     );
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_COMMENT"]).toBe("value");
+    expect(process.env.DOTENV_TEST_COMMENT).toBe("value");
   });
 
   it("skips malformed lines that have no equals sign", () => {
-    delete process.env["DOTENV_TEST_MALFORMED"];
-    delete process.env["DOTENV_TEST_PLAIN"];
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_MALFORMED");
+    Reflect.deleteProperty(process.env, "DOTENV_TEST_PLAIN");
     const cfg = writeTempConfig("DOTENV_TEST_MALFORMED\nDOTENV_TEST_PLAIN=ok\n");
     loadDotEnv(cfg);
-    expect(process.env["DOTENV_TEST_MALFORMED"]).toBeUndefined();
-    expect(process.env["DOTENV_TEST_PLAIN"]).toBe("ok");
+    expect(process.env.DOTENV_TEST_MALFORMED).toBeUndefined();
+    expect(process.env.DOTENV_TEST_PLAIN).toBe("ok");
   });
 
   it("does not throw when the .env file does not exist next to the config", () => {

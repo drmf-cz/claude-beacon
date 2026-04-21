@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.8.6] — 2026-04-21
+
+### Fix
+- `buildReviewNotification`: PR review comment snippets increased from 120 → 400 chars so Claude sees enough context to act without fetching each comment URL individually.
+- `on_pr_review` default instruction: step 2 now reads `gh pr view {pr_number} --repo {repo} --comments` instead of the vague "Open every linked comment URL" — gives Claude a concrete command to fetch full comment text.
+- `buildReviewNotification`: passes `pr_number` and `repo` to instruction `interpolate()` so `{pr_number}` and `{repo}` are available as placeholders in user-configured `on_pr_review.instruction` templates.
+- `hub.test.ts`: replace `delete process.env.X` with `Reflect.deleteProperty(process.env, "X")` to fix TypeScript 6.0 narrowing issue where `delete` permanently narrowed the property to `undefined` even after a function call restored it.
+
+## [1.8.5] — 2026-04-21
+
+### Fix
+- `NotificationEventStore.replayEventsAfter` (hub + mux): when `lastEventId` is empty or unknown (new/reconnected SSE session with no `Last-Event-ID`), now replays **all** buffered events instead of returning early with `""`. Previously, any notifications sent while the SSE stream was down were silently lost the moment the client reconnected — the hub logged "Pushed to N session(s)" but the events were discarded. Each store is scoped to a single session, so replaying all is safe.
+- `NotificationEventStore.storeEvent`: adds `[sse] no active stream — buffered event` log line so it is immediately visible in hub/mux output when an event is buffered rather than delivered.
+- `sendChannelNotification`: renamed log from "Pushed to Claude" to "Queued for SSE" to clarify that the SDK accepted the call, not that Claude received it.
+- Hub/mux delivery log: renamed "Pushed to N session(s)" to "Accepted by N session(s)" with a pointer to `[sse]` lines for actual delivery status.
+
+## [1.8.4] — 2026-04-21
+
+### Fix
+- `on_pr_review` default: set `use_worktree: false` (was `true`) — the old default injected a false "You are running inside an isolated Claude Code worktree" preamble into the notification even though the receiving session is a normal session, not a worktree. This contradicted the claim block that follows (which tells Claude to check its branch and maybe create a worktree), causing Claude to stall without acting.
+- `on_pr_review` instruction: replace "Plan before acting" language with "Act immediately — no confirmation needed." to match the directive style of other event handlers and prevent unintended plan-mode activation.
+- Remove dead `require_plan` field from `PRReviewBehavior` interface and defaults (it was documented to add an `EnterPlanMode` directive but was never wired into instruction building).
+
 ## [1.8.3] — 2026-04-15
 
 ### Features

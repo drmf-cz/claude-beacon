@@ -254,7 +254,7 @@ export function buildReviewNotification(
     const stateLabel = reviewRecord?.state ? ` [${reviewRecord.state}]` : "";
     lines.push(`@${reviewer}${stateLabel}:`);
     for (const ev of revEvents) {
-      const snippet = ev.body.slice(0, 120);
+      const snippet = ev.body.slice(0, 400);
       const location = ev.path ? ` (${ev.path})` : "";
       const prefix = ev.type === "unresolved_thread" ? "🔄 re-opened" : "•";
       lines.push(`  ${prefix} "${snippet}"${location}`);
@@ -270,6 +270,8 @@ export function buildReviewNotification(
   const instruction = interpolate(behavior.instruction, {
     skill: behavior.skill,
     worktree_preamble: buildWorktreePreamble(behavior.use_worktree),
+    pr_number: String(meta.prNumber),
+    repo: meta.repo,
   });
   lines.push("", ...instruction.split("\n"));
 
@@ -1272,7 +1274,7 @@ export async function sendChannelNotification(
     },
   });
   log(
-    `Pushed to Claude: ${notification.meta.event ?? notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
+    `Queued for SSE: ${notification.meta.event ?? notification.meta.status ?? notification.meta.mergeable_state} on ${notification.meta.repo}`,
   );
 }
 
