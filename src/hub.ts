@@ -25,20 +25,38 @@
  */
 
 import { createHmac, randomUUID } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { parse } from "yaml";
 import { z } from "zod";
 import type { Config, HubConfig, HubUserBehavior, HubUserProfile } from "./config.js";
 import { DEFAULT_CONFIG, loadHubConfig, resolveUserConfig } from "./config.js";
 import type { NotifyFn, RoutingKey } from "./server.js";
-import { createMcpServer, sendChannelNotification, startWebhookServer } from "./server.js";
-import { loadFilter, openFilterStore, saveFilter } from "./store.js";
+import {
+  claimKeyFor,
+  createMcpServer,
+  deleteClaimFile,
+  enrichNotification,
+  NotificationEventStore,
+  sendChannelNotification,
+  sendStatusLine,
+  startWebhookServer,
+  writeClaimFile,
+} from "./server.js";
+import {
+  deleteExpiredPending,
+  deletePending,
+  loadAllPending,
+  loadUniqueFilter,
+  loadUserBehavior,
+  openFilterStore,
+  saveFilter,
+  savePending,
+  saveUserBehavior,
+} from "./store.js";
 import type { CINotification } from "./types.js";
 
 const log = (...args: unknown[]) =>
@@ -93,74 +111,6 @@ let hubConfig: HubConfig = {
 let tokenMap: Map<string, HubUserProfile> = new Map();
 let fallbackWorker: FallbackWorker;
 
-// ── Claim file helpers ────────────────────────────────────────────────────────
-
-const CLAIM_FILE = join(homedir(), ".claude", "beacon-active-claim");
-
-function writeClaimFile(claimKey: string): void {
-  try {
-    writeFileSync(CLAIM_FILE, claimKey, "utf8");
-  } catch {
-    // Non-fatal
-  }
-}
-
-function deleteClaimFile(): void {
-  try {
-    rmSync(CLAIM_FILE, { force: true });
-  } catch {
-    // Non-fatal
-  }
-}
-
-// ── Notification event store ──────────────────────────────────────────────────
-
-class NotificationEventStore implements EventStore {
-  private events = new Map<string, { streamId: string; message: unknown }>();
-
-  async storeEvent(streamId: string, message: unknown): Promise<string> {
-    const id = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    this.events.set(id, { streamId, message });
-    log(
-      `[sse] no active stream — buffered event ${id.slice(-8)} (total buffered: ${this.events.size})`,
-    );
-    return id;
-  }
-
-  async replayEventsAfter(
-    lastEventId: string,
-    { send }: { send: (id: string, msg: unknown) => Promise<void> },
-  ): Promise<string> {
-    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-
-    // New or unknown SSE connection — replay all buffered events for this session.
-    // Each NotificationEventStore is scoped to one session, so replaying all is safe.
-    if (!lastEventId || !this.events.has(lastEventId)) {
-      if (sorted.length > 0) {
-        log(`[sse] replaying ${sorted.length} buffered event(s) to new SSE connection`);
-      }
-      for (const [id, { message }] of sorted) {
-        await send(id, message);
-      }
-      const last = sorted[sorted.length - 1];
-      return last ? (last[0].split("_")[0] ?? "") : "";
-    }
-
-    // Resume from a known event ID — skip everything up to and including it.
-    const streamId = lastEventId.split("_")[0] ?? "";
-    let found = false;
-    for (const [id, { streamId: sid, message }] of sorted) {
-      if (sid !== streamId) continue;
-      if (id === lastEventId) {
-        found = true;
-        continue;
-      }
-      if (found) await send(id, message);
-    }
-    return streamId;
-  }
-}
-
 // ── Session registry ──────────────────────────────────────────────────────────
 
 interface HubSessionEntry {
@@ -175,6 +125,8 @@ interface HubSessionEntry {
   lastActivityAt: number;
   /** Per-session behavior override set via the set_behavior MCP tool. Highest priority. */
   behavior?: Partial<HubUserBehavior>;
+  /** Whether this session holds the catch-all grant for its user (receives events matching no specific branch). */
+  catchall: boolean;
 }
 
 const sessions = new Map<string, HubSessionEntry>();
@@ -195,6 +147,35 @@ function removeUserSession(username: string, sessionId: string): void {
   if (!ids) return;
   ids.delete(sessionId);
   if (ids.size === 0) userSessions.delete(username);
+}
+
+// ── Catch-all grants ──────────────────────────────────────────────────────────
+
+/** One catch-all grant per github_username → sessionId (first-claim-wins). */
+const catchallGrants = new Map<string, string>();
+
+function tryCatchallClaim(
+  username: string,
+  sessionId: string,
+  idleTtlMs: number,
+): "granted" | "stolen" | "denied" {
+  const currentId = catchallGrants.get(username);
+  if (!currentId || currentId === sessionId) {
+    catchallGrants.set(username, sessionId);
+    return "granted";
+  }
+  const holder = sessions.get(currentId);
+  // Steal the grant when the current holder is gone or has been idle for over half the TTL
+  if (!holder || Date.now() - holder.lastActivityAt > idleTtlMs / 2) {
+    if (holder) holder.catchall = false;
+    catchallGrants.set(username, sessionId);
+    return "stolen";
+  }
+  return "denied";
+}
+
+function releaseCatchallGrant(username: string, sessionId: string): void {
+  if (catchallGrants.get(username) === sessionId) catchallGrants.delete(username);
 }
 
 // ── Work-context claims ───────────────────────────────────────────────────────
@@ -222,13 +203,10 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-function claimKeyFor(routing: RoutingKey): string {
-  return routing.branch ? `${routing.repo}:${routing.branch}` : `${routing.repo}:*`;
-}
-
 // ── Pre-registration notification queue ──────────────────────────────────────
 
 interface PendingNotification {
+  id: string;
   notification: CINotification;
   routing: RoutingKey;
   receivedAt: number;
@@ -237,6 +215,26 @@ interface PendingNotification {
 const pendingByRepo = new Map<string, PendingNotification[]>();
 const MAX_PENDING_REPOS = 100;
 const MAX_PENDING_PER_REPO = 50;
+
+function restorePendingFromStore(): void {
+  const items = loadAllPending();
+  const now = Date.now();
+  let count = 0;
+  for (const item of items) {
+    if (now - item.receivedAt >= config.server.pending_ttl_ms) continue;
+    const key = item.routing.repo ?? "*";
+    const existing = pendingByRepo.get(key) ?? [];
+    existing.push({
+      id: item.id,
+      notification: item.notification as unknown as CINotification,
+      routing: item.routing as RoutingKey,
+      receivedAt: item.receivedAt,
+    });
+    pendingByRepo.set(key, existing);
+    count++;
+  }
+  if (count > 0) log(`Restored ${count} pending notification(s) from SQLite`);
+}
 
 function enqueuePending(routing: RoutingKey, notification: CINotification): void {
   const key = routing.repo ?? "*";
@@ -249,8 +247,10 @@ function enqueuePending(routing: RoutingKey, notification: CINotification): void
     (n) => now - n.receivedAt < config.server.pending_ttl_ms,
   );
   if (existing.length >= MAX_PENDING_PER_REPO) existing.shift();
-  existing.push({ notification, routing, receivedAt: now });
+  const id = randomUUID();
+  existing.push({ id, notification, routing, receivedAt: now });
   pendingByRepo.set(key, existing);
+  savePending(id, routing, notification as unknown as Record<string, unknown>);
   log(
     `Queued for replay (no session): ${routing.repo}@${routing.branch ?? "*"} — queue depth: ${existing.length}`,
   );
@@ -269,12 +269,13 @@ async function flushPendingToSession(repo: string | null, session: HubSessionEnt
     }
     log(`Flushing ${fresh.length} queued notification(s) for ${key} to ${session.github_username}`);
     let anyDelivered = false;
-    for (const { notification, routing } of fresh) {
+    for (const { id, notification, routing } of fresh) {
       const claimKey = claimKeyFor(routing);
       const enriched = enrichNotification(notification, claimKey, "normal");
       try {
         await sendChannelNotification(session.server, enriched);
         anyDelivered = true;
+        deletePending(id);
       } catch (err) {
         log(`Failed to flush pending notification for ${key}:`, err);
       }
@@ -306,6 +307,17 @@ setInterval(
         session.transport.close().catch(() => {});
       }
     }
+    if (sessions.size > 0) {
+      const summary = [...sessions.entries()]
+        .map(
+          ([id, s]) =>
+            `${id.slice(0, 8)}(${s.github_username}) ${s.repo ?? "*"}@${s.branch ?? "*"} idle=${Math.round((now - s.lastActivityAt) / 60_000)}m`,
+        )
+        .join(", ");
+      log(`Active sessions [${sessions.size}]: ${summary}`);
+    }
+    const expired = deleteExpiredPending(config.server.pending_ttl_ms);
+    if (expired > 0) log(`Expired ${expired} pending notification(s) from SQLite`);
   },
   5 * 60 * 1000,
 ).unref();
@@ -357,10 +369,11 @@ export function selectHubRecipients(
           .filter((s): s is HubSessionEntry => s !== undefined)
       : [...allSessions.values()];
 
-  // Tier 1+2: repo + branch match within candidate pool
+  // Tier 1+2: repo + branch match within candidate pool.
+  // catch-all sessions (catchall===true) also participate here and receive everything for the repo.
   const primary = candidatePool.filter(
     (s) =>
-      forRepo(s) && (s.branch === null || routing.branch === null || s.branch === routing.branch),
+      forRepo(s) && (s.catchall === true || routing.branch === null || s.branch === routing.branch),
   );
 
   if (primary.length > 0) {
@@ -371,69 +384,20 @@ export function selectHubRecipients(
     return { recipients: sorted, mode: "normal" };
   }
 
-  // Tier 3: catch-all within candidate pool
-  const catchall = candidatePool.filter(forRepo);
+  // Tier 3: catch-all — only sessions that hold the catch-all grant.
+  const forCatchall = (s: HubSessionEntry) => forRepo(s) && s.catchall === true;
+  const catchall = candidatePool.filter(forCatchall);
   if (catchall.length > 0) return { recipients: catchall, mode: "catchall" };
 
-  // If Tier 0 had candidates but no repo match — fall through to all sessions
+  // If Tier 0 had candidates but none matched — fall through to catch-all sessions globally
   if (authorIds !== null && candidatePool.length > 0) {
-    return { recipients: [...allSessions.values()].filter(forRepo), mode: "catchall" };
+    return {
+      recipients: [...allSessions.values()].filter(forCatchall),
+      mode: "catchall",
+    };
   }
 
   return { recipients: [], mode: "catchall" };
-}
-
-function enrichNotification(
-  n: CINotification,
-  claimKey: string,
-  mode: "owned" | "normal" | "catchall",
-): CINotification {
-  const meta = { ...n.meta, claim_key: claimKey };
-  if (mode === "owned") return { meta, summary: n.summary };
-
-  const branch = n.meta.branch ?? n.meta.head_branch ?? null;
-  const branchSlug = branch?.replace(/[^a-z0-9]/gi, "-") ?? "fix";
-
-  const catchallHeader =
-    mode === "catchall"
-      ? [
-          "⚠️  CATCH-ALL DELIVERY: no session is currently in the worktree for this branch.",
-          "One of you must volunteer by claiming it and creating a worktree.",
-          "",
-        ]
-      : [];
-
-  const worktreeBlock = branch
-    ? [
-        `IF claim returns "ok":`,
-        `  a) Your current branch IS "${branch}":`,
-        `     → Fix here in your current directory`,
-        `  b) Your current branch IS NOT "${branch}":`,
-        `     → git worktree add /tmp/${branchSlug}-fix ${branchSlug}`,
-        `     → Fix in that worktree, commit, push`,
-        `     → Call release_claim("${claimKey}") when done`,
-        `     → git worktree remove /tmp/${branchSlug}-fix`,
-      ]
-    : [
-        `IF claim returns "ok": fix in your current directory.`,
-        `Call release_claim("${claimKey}") when done.`,
-      ];
-
-  const claimBlock = [
-    "",
-    "─────────────────────────────────────────",
-    ...catchallHeader,
-    `BEFORE ACTING: call claim_notification("${claimKey}")`,
-    '  "ok"           → you have the lock, continue',
-    '  "already_owned"→ you already hold it (TTL extended); continue if still working',
-    '  "conflict:X"   → session X claimed it, STOP immediately',
-    '  "expired"      → STOP',
-    "",
-    ...worktreeBlock,
-    "─────────────────────────────────────────",
-  ].join("\n");
-
-  return { meta, summary: n.summary + claimBlock };
 }
 
 // ── Fallback worker ───────────────────────────────────────────────────────────
@@ -517,10 +481,7 @@ export class FallbackWorker {
       this.invoke(entry).catch((err) => log("Fallback worker error:", err));
     }, timeoutMs);
 
-    // Don't prevent process exit
-    if (typeof timer === "object" && timer !== null && "unref" in timer) {
-      (timer as { unref(): void }).unref();
-    }
+    timer.unref(); // Don't prevent process exit
 
     this.pending.set(claimKey, { notification, routing, profile, eventType, timer });
   }
@@ -548,7 +509,7 @@ export class FallbackWorker {
     try {
       const msg = await client.messages.create({
         model: this.cfg.fallback.model,
-        max_tokens: 8096,
+        max_tokens: 8192,
         messages: [{ role: "user", content: prompt }],
       });
       const first = msg.content[0];
@@ -629,17 +590,6 @@ export class FallbackWorker {
 
 // ── Status line helpers ───────────────────────────────────────────────────────
 
-async function sendStatusLine(server: McpServer, text: string): Promise<void> {
-  try {
-    await server.server.notification({
-      method: "notifications/claude/statusLine",
-      params: { text },
-    });
-  } catch {
-    // Best-effort
-  }
-}
-
 function buildStatusText(
   entry: HubSessionEntry,
   claimKey?: string,
@@ -696,12 +646,31 @@ function createHubSession(profile: HubUserProfile): {
         ),
     },
     async ({ repo, branch, label, worktree_path }) => {
+      let catchallNote = "";
       if (entry) {
+        // Manage catch-all grant on branch transition
+        if (branch === null) {
+          const result = tryCatchallClaim(
+            profile.github_username,
+            sessionId,
+            config.server.session_idle_ttl_ms,
+          );
+          entry.catchall = result !== "denied";
+          if (result === "granted") catchallNote = " Catch-all grant: granted.";
+          else if (result === "stolen")
+            catchallNote = " Catch-all grant: stolen from idle session.";
+          else catchallNote = " Catch-all grant: denied — another active session holds it.";
+        } else if (entry.catchall) {
+          releaseCatchallGrant(profile.github_username, sessionId);
+          entry.catchall = false;
+          catchallNote = " Catch-all grant released (specific branch registered).";
+        }
+
         entry.repo = repo;
         entry.branch = branch;
         entry.label = label ? label.replace(/[^\x20-\x7E]/g, "").slice(0, 80) : null;
         entry.worktree_path = worktree_path ?? null;
-        saveFilter(profile.github_username, {
+        saveFilter(profile.github_username, entry.worktree_path, {
           repo,
           branch,
           label: entry.label,
@@ -723,9 +692,130 @@ function createHubSession(profile: HubUserProfile): {
         content: [
           {
             type: "text" as const,
-            text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.`,
+            text: `Filter registered for @${profile.github_username}: ${repo ?? "*"}@${branch ?? "*"}.${catchallNote}`,
           },
         ],
+      };
+    },
+  );
+
+  server.tool(
+    "ping",
+    "No-op keep-alive. Call this every 15–20 minutes when idle to prevent hub session eviction. Also useful to confirm the MCP connection is alive.",
+    {},
+    async () => {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `pong — session ${sessionId.slice(0, 8)} alive, user ${profile.github_username}`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
+    "get_status",
+    [
+      "Return a full diagnostic snapshot of this hub session: current filter,",
+      "active work claims, pending notification queue (events waiting for a",
+      "matching session), and all other registered sessions so you can see what",
+      "repos/branches are covered and which events fall outside your filter.",
+    ].join(" "),
+    {},
+    async () => {
+      const now = Date.now();
+
+      // ── This session ──────────────────────────────────────────────────────
+      const filter = {
+        repo: entry?.repo ?? null,
+        branch: entry?.branch ?? null,
+        label: entry?.label ?? null,
+        worktree_path: entry?.worktree_path ?? null,
+      };
+
+      const idleMs = entry ? now - entry.lastActivityAt : 0;
+      const idleMin = Math.round(idleMs / 60_000);
+
+      // ── Active claims held by this session ────────────────────────────────
+      const myClaims = [...workClaims.entries()]
+        .filter(([, c]) => c.sessionId === sessionId)
+        .map(([key, c]) => ({
+          key,
+          label: c.label,
+          expires_in: `${Math.max(0, Math.ceil((c.expiresAt - now) / 60_000))}m`,
+        }));
+
+      // ── Pending queue (events waiting for a session) ──────────────────────
+      const pendingQueue = [...pendingByRepo.entries()]
+        .map(([repo, items]) => {
+          const fresh = items.filter((n) => now - n.receivedAt < config.server.pending_ttl_ms);
+          return {
+            repo,
+            count: fresh.length,
+            oldest_age: fresh.length
+              ? `${Math.round((now - (fresh[0]?.receivedAt ?? now)) / 60_000)}m`
+              : null,
+            branches: [...new Set(fresh.map((n) => n.routing.branch ?? "*"))],
+          };
+        })
+        .filter((r) => r.count > 0);
+
+      // ── All active sessions (hub-wide view) ───────────────────────────────
+      const allSessions = [...sessions.entries()].map(([id, s]) => ({
+        session_id: id.slice(0, 8),
+        user: s.github_username,
+        repo: s.repo ?? "*",
+        branch: s.branch ?? "*",
+        label: s.label ?? null,
+        catchall_grant: s.catchall,
+        idle: `${Math.round((now - s.lastActivityAt) / 60_000)}m`,
+        is_me: id === sessionId,
+      }));
+
+      // ── Config timeouts ───────────────────────────────────────────────────
+      const timeouts = {
+        session_idle_ttl: `${Math.round(config.server.session_idle_ttl_ms / 60_000)}m`,
+        pending_ttl: `${Math.round(config.server.pending_ttl_ms / 60_000)}m`,
+        debounce_ms: config.server.debounce_ms,
+        review_debounce_ms: config.server.review_debounce_ms,
+      };
+
+      // ── Hub-wide scope ────────────────────────────────────────────────────
+      // allowed_repos: empty = accept all repos; non-empty = only listed repos
+      // pending_queue: events that arrived when NO session matched their repo/branch.
+      //   They wait here until a session calls set_filter with a matching repo.
+      //   Events delivered to an active session never appear here.
+      const hubScope = {
+        allowed_repos:
+          config.webhooks.allowed_repos.length > 0 ? config.webhooks.allowed_repos : ["*"],
+        allowed_authors: config.webhooks.allowed_authors,
+        allowed_events:
+          config.webhooks.allowed_events.length > 0 ? config.webhooks.allowed_events : ["*"],
+        pending_queue_note:
+          "Shows events that matched no active session at arrival time. " +
+          "Your matched events are delivered directly and never appear here.",
+      };
+
+      const result = {
+        session: {
+          id: sessionId.slice(0, 8),
+          user: profile.github_username,
+          idle: `${idleMin}m`,
+          filter,
+          catchall_grant: entry?.catchall ?? false,
+        },
+        active_claims: myClaims,
+        pending_queue: pendingQueue,
+        all_sessions: allSessions,
+        hub_scope: hubScope,
+        config: timeouts,
+      };
+
+      log(`get_status called by ${profile.github_username} (${sessionId.slice(0, 8)})`);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     },
   );
@@ -763,15 +853,111 @@ function createHubSession(profile: HubUserProfile): {
       if (entry) {
         entry.behavior = parsed as Partial<HubUserBehavior>;
       }
+      saveUserBehavior(profile.github_username, behavior_yaml);
       log(`Behavior set for @${profile.github_username} (session ${sessionId.slice(0, 8)})`);
       return {
         content: [
           {
             type: "text" as const,
-            text: "Behavior config applied for this session. Instructions will use your local overrides.",
+            text: "Behavior config applied for this session and persisted — will be restored automatically on reconnect.",
           },
         ],
       };
+    },
+  );
+
+  server.tool(
+    "release_catchall",
+    "Release the catch-all grant so another session can claim it. Use when you no longer want to receive all events for this repo (e.g. before setting a specific branch filter, or on cleanup).",
+    {},
+    async () => {
+      if (!entry?.catchall) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "not_holder — this session does not hold the catch-all grant",
+            },
+          ],
+        };
+      }
+      releaseCatchallGrant(profile.github_username, sessionId);
+      entry.catchall = false;
+      log(`Catch-all released by ${profile.github_username} (${sessionId.slice(0, 8)})`);
+      if (entry) await sendStatusLine(server, buildStatusText(entry));
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "released — catch-all grant is now available for another session to claim",
+          },
+        ],
+      };
+    },
+  );
+
+  server.tool(
+    "get_behavior",
+    "Show the effective behavior configuration for this session: per-event settings with source annotation (SQLite / config.yaml / global default). Use to inspect or audit current behavior before using set_behavior to adjust.",
+    {},
+    async () => {
+      const resolvedConfig = resolveUserConfig(config, profile, entry?.behavior);
+
+      const sqliteBehavior = entry?.behavior ?? null;
+      const profileBehavior = profile.behavior ?? null;
+
+      type BehaviorKey = keyof Omit<HubUserBehavior, "code_style">;
+
+      function sourceFor(key: BehaviorKey | "code_style"): string {
+        if (sqliteBehavior && key in sqliteBehavior) return "SQLite";
+        if (profileBehavior && key in profileBehavior) return "config.yaml";
+        return "global default";
+      }
+
+      const beh = resolvedConfig.behavior;
+      const lines: string[] = [
+        `Effective behavior for @${profile.github_username}`,
+        "Source priority: [SQLite] > [config.yaml] > [global default]",
+        "",
+      ];
+
+      function addEvent(label: string, key: BehaviorKey): void {
+        const src = sourceFor(key);
+        const val = beh[key] as unknown as Record<string, unknown> | undefined;
+        if (!val || typeof val !== "object") return;
+        const props = Object.entries(val)
+          .filter(([k]) => k !== "instruction")
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+          .join("  ");
+        lines.push(`${label}  [${src}]${props ? `  ${props}` : ""}`);
+        if (typeof val.instruction === "string") {
+          const instr = val.instruction;
+          const preview = instr.slice(0, 120).replace(/\n/g, " ↵ ");
+          lines.push(`  Instruction: ${preview}${instr.length > 120 ? "…" : ""}`);
+        }
+        lines.push("");
+      }
+
+      addEvent("on_pr_review", "on_pr_review");
+      addEvent("on_pr_review_as_reviewer", "on_pr_review_as_reviewer");
+      addEvent("on_ci_failure_main", "on_ci_failure_main");
+      addEvent("on_ci_failure_branch", "on_ci_failure_branch");
+      addEvent("on_merge_conflict", "on_merge_conflict");
+      addEvent("on_branch_behind", "on_branch_behind");
+      addEvent("on_pr_opened", "on_pr_opened");
+      addEvent("on_pr_approved", "on_pr_approved");
+      addEvent("on_dependabot_alert", "on_dependabot_alert");
+      addEvent("on_code_scanning_alert", "on_code_scanning_alert");
+
+      if (resolvedConfig.code_style) {
+        const src = sourceFor("code_style");
+        const cs = resolvedConfig.code_style;
+        lines.push(`code_style  [${src}]`);
+        lines.push(`  ${cs.slice(0, 80)}${cs.length > 80 ? "…" : ""}`);
+        lines.push("");
+      }
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     },
   );
 
@@ -840,11 +1026,13 @@ function createHubSession(profile: HubUserProfile): {
       sessionId = id;
       return id;
     },
-    eventStore: new NotificationEventStore(),
+    eventStore: new NotificationEventStore(log),
     onsessioninitialized: (id) => {
       sessionId = id;
       const df = profile.default_filter;
-      const pf = loadFilter(profile.github_username);
+      // Only restore if user has exactly one DB row — avoids wrong-filter restoration for
+      // multi-session users whose last set_filter call may have come from a different session.
+      const pf = loadUniqueFilter(profile.github_username);
 
       // Priority: persisted filter (from last set_filter call) > default_filter from config > null
       const effectiveRepo = pf?.repo ?? df?.repo ?? null;
@@ -862,14 +1050,40 @@ function createHubSession(profile: HubUserProfile): {
         label: effectiveLabel,
         worktree_path: effectivePath,
         lastActivityAt: Date.now(),
+        catchall: false,
       };
       sessions.set(id, entry);
       addUserSession(profile.github_username, id);
 
-      const source = pf ? "persisted" : df ? "default_filter" : "none";
+      // Auto-claim catch-all grant when reconnecting with a null branch
+      if (effectiveBranch === null) {
+        const claimResult = tryCatchallClaim(
+          profile.github_username,
+          id,
+          config.server.session_idle_ttl_ms,
+        );
+        entry.catchall = claimResult !== "denied";
+        log(`Catch-all claim on connect: ${profile.github_username} → ${claimResult}`);
+      }
+
+      const source = pf ? "persisted (unique)" : df ? "default_filter" : "none";
       log(
         `Session connected: ${id.slice(0, 8)} (${profile.github_username}) (total: ${sessions.size})`,
       );
+
+      // Restore persisted behavior (set via set_behavior tool)
+      const savedBehavior = loadUserBehavior(profile.github_username);
+      if (savedBehavior) {
+        try {
+          const parsed = parse(savedBehavior);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            entry.behavior = parsed as Partial<HubUserBehavior>;
+            log(`Restored behavior for ${profile.github_username}`);
+          }
+        } catch {
+          log(`Skipping corrupt persisted behavior for ${profile.github_username}`);
+        }
+      }
 
       if (pf !== null || df !== undefined) {
         log(`Auto-filter applied: ${effectiveRepo ?? "*"}@${effectiveBranch ?? "*"} [${source}]`);
@@ -889,7 +1103,13 @@ function createHubSession(profile: HubUserProfile): {
     },
     onsessionclosed: (id) => {
       const session = sessions.get(id);
-      if (session) removeUserSession(session.github_username, id);
+      if (session) {
+        removeUserSession(session.github_username, id);
+        if (session.catchall) {
+          releaseCatchallGrant(session.github_username, id);
+          log(`Catch-all grant released on disconnect: ${session.github_username}`);
+        }
+      }
       sessions.delete(id);
       for (const [k, c] of workClaims) {
         if (c.sessionId === id) {
@@ -954,8 +1174,16 @@ const routeToSessions: NotifyFn = async (
   const enriched = enrichNotification(notification, claimKey, mode);
   let sent = 0;
   for (const session of recipients) {
+    // When the notification has a reviewer_summary (PR review events only), send the
+    // reviewer variant to sessions whose user is not the PR author. This lets the hub
+    // distinguish "address comments on your PR" from "help me review someone else's PR".
+    const isAuthor = routing.pr_author != null && session.github_username === routing.pr_author;
+    const toSend =
+      !isAuthor && enriched.reviewer_summary != null
+        ? { ...enriched, summary: enriched.reviewer_summary }
+        : enriched;
     try {
-      await sendChannelNotification(session.server, enriched);
+      await sendChannelNotification(session.server, toSend);
       session.lastActivityAt = Date.now();
       sent++;
     } catch (err) {
@@ -993,7 +1221,7 @@ const MCP_PORT = Number(process.env.MCP_PORT ?? 9444);
 // Proxies (nginx default: 60 s) interpret silence as a dead connection.
 const SSE_PING_INTERVAL_MS = 25_000;
 
-function withSsePing(response: Response): Response {
+function withSsePing(response: Response, onPing?: () => void): Response {
   if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
     return response;
   }
@@ -1005,6 +1233,7 @@ function withSsePing(response: Response): Response {
       pingTimer = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": ping\n\n"));
+          onPing?.();
         } catch {
           clearInterval(pingTimer);
           pingTimer = undefined;
@@ -1084,7 +1313,9 @@ function startMcpServer(): void {
           return new Response("Forbidden", { status: 403 });
         }
         session.lastActivityAt = Date.now();
-        return withSsePing(await session.transport.handleRequest(req));
+        return withSsePing(await session.transport.handleRequest(req), () => {
+          session.lastActivityAt = Date.now();
+        });
       }
 
       if (req.method !== "POST") {
@@ -1172,7 +1403,11 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     const dbPath =
       hubConfig.session_store_path ?? join(dirname(resolve(configPath)), "hub-session-filters.db");
     openFilterStore(dbPath);
+    restorePendingFromStore();
     log(`Session filter store: ${dbPath}`);
+    log(
+      `Timeouts: idle=${config.server.session_idle_ttl_ms / 60_000}m pending=${config.server.pending_ttl_ms / 60_000}m debounce=${config.server.debounce_ms}ms review_debounce=${config.server.review_debounce_ms}ms`,
+    );
   } else {
     // ── Single-user --author mode ────────────────────────────────────────────
     // Load .env from CWD (no config file path to derive from).
@@ -1207,7 +1442,11 @@ Full docs: https://github.com/drmf-cz/claude-beacon/blob/main/docs/hub-mode.md\n
     config.webhooks.allowed_authors = [authorArg as string];
     tokenMap = new Map([[bearerToken, profile]]);
     openFilterStore(join(process.cwd(), "hub-session-filters.db"));
+    restorePendingFromStore();
     log(`Session filter store: ${process.cwd()}/hub-session-filters.db`);
+    log(
+      `Single-user mode: no config file — all timeouts use defaults (idle=30m, pending=120m). Use --config to customise.`,
+    );
 
     const mcpPort = Number(process.env.MCP_PORT ?? 9444);
     process.stderr.write(

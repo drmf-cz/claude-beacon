@@ -1,5 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { EventStore } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import type {
   CodeScanningMinSeverity,
@@ -161,6 +165,11 @@ interface PendingPRReview {
   prTitle: string;
   prUrl: string;
   repo: string;
+  /** Locked to the onFire from the first event so routing key doesn't change on extension. */
+  onFire: (
+    events: ReviewEventRecord[],
+    meta: { prNumber: number; prTitle: string; prUrl: string; repo: string },
+  ) => void;
 }
 
 // Exported for testing
@@ -207,16 +216,20 @@ export function scheduleReviewNotification(
     if (existing.events.length >= maxEvents) return false; // window full
     clearTimeout(existing.timer);
     existing.events.push(event);
+    // Reuse existing.onFire (locked to the first event's routing key).
+    // Do NOT use the current call's onFire — it may have a different routing key
+    // (e.g. issue_comment has branch=null, while pull_request_review has the real branch).
     existing.timer = setTimeout(() => {
       const entry = pendingReviews.get(key);
       pendingReviews.delete(key);
       reviewCooldowns.set(key, Date.now() + cooldownMs);
-      if (entry) onFire(entry.events, prMeta);
+      if (entry) entry.onFire(entry.events, prMeta);
     }, debounceMs);
   } else {
     const entry: PendingPRReview = {
       ...prMeta,
       events: [event],
+      onFire,
       timer: setTimeout(() => {
         pendingReviews.delete(key);
         reviewCooldowns.set(key, Date.now() + cooldownMs);
@@ -266,17 +279,29 @@ export function buildReviewNotification(
     lines.push("", "── Code style guidelines ──", config.code_style);
   }
 
-  const behavior = config.behavior.on_pr_review;
-  const instruction = interpolate(behavior.instruction, {
-    skill: behavior.skill,
-    worktree_preamble: buildWorktreePreamble(behavior.use_worktree),
-    pr_number: String(meta.prNumber),
-    repo: meta.repo,
-  });
-  lines.push("", ...instruction.split("\n"));
+  const buildInstruction = (behavior: {
+    skill: string;
+    use_worktree: boolean;
+    instruction: string;
+  }) =>
+    interpolate(behavior.instruction, {
+      skill: behavior.skill,
+      worktree_preamble: buildWorktreePreamble(behavior.use_worktree),
+      pr_number: String(meta.prNumber),
+      repo: meta.repo,
+    });
+
+  // Author summary: used when the receiving session's user is the PR author
+  const authorInstruction = buildInstruction(config.behavior.on_pr_review);
+  const authorLines = [...lines, "", ...authorInstruction.split("\n")];
+
+  // Reviewer summary: used when the receiving session's user is NOT the PR author
+  const reviewerInstruction = buildInstruction(config.behavior.on_pr_review_as_reviewer);
+  const reviewerLines = [...lines, "", ...reviewerInstruction.split("\n")];
 
   return {
-    summary: lines.join("\n"),
+    summary: authorLines.join("\n"),
+    reviewer_summary: reviewerLines.join("\n"),
     meta: {
       source: "github-ci",
       event: "pr_review",
@@ -1307,6 +1332,28 @@ export function extractEventRouting(event: string, payload: GitHubWebhookPayload
     return { repo, branch: payload.pull_request?.head.ref ?? null, pr_author: prAuthor };
   }
 
+  if (event === "check_suite") {
+    return {
+      repo,
+      branch: payload.check_suite?.head_branch ?? null,
+      pr_author: payload.sender?.login ?? null,
+    };
+  }
+
+  if (event === "check_run") {
+    const branch =
+      payload.check_run?.head_branch ?? payload.check_run?.check_suite?.head_branch ?? null;
+    return { repo, branch, pr_author: payload.sender?.login ?? null };
+  }
+
+  if (event === "workflow_job") {
+    return {
+      repo,
+      branch: payload.workflow_job?.head_branch ?? null,
+      pr_author: payload.sender?.login ?? null,
+    };
+  }
+
   return { repo, branch: null, pr_author: payload.sender?.login ?? null };
 }
 
@@ -1510,7 +1557,7 @@ function handleParsedReviewEvent(
       }
     },
     {
-      debounceMs: config.server.debounce_ms,
+      debounceMs: config.server.review_debounce_ms,
       cooldownMs: config.server.cooldown_ms,
       maxEvents: config.server.max_events_per_window,
     },
@@ -1538,6 +1585,168 @@ function handleReviewEvents(
     logReviewSkipReason(event, payload);
   }
   return new Response("OK", { status: 200 });
+}
+
+// ── Shared session utilities ─────────────────────────────────────────────────
+// These are used by both hub.ts and mux.ts. Centralised here to avoid drift
+// between the two implementations.
+
+/** Builds the claim key used as the work-context lock. */
+export function claimKeyFor(routing: RoutingKey): string {
+  return routing.branch ? `${routing.repo}:${routing.branch}` : `${routing.repo}:*`;
+}
+
+// Written to ~/.claude/beacon-active-claim so a Claude Code Stop hook can read
+// the current claim key and POST /release-claim to free it without an MCP call.
+const CLAIM_FILE = join(homedir(), ".claude", "beacon-active-claim");
+
+export function writeClaimFile(claimKey: string): void {
+  try {
+    writeFileSync(CLAIM_FILE, claimKey, "utf8");
+  } catch {
+    // Non-fatal — Stop hook will fall back to TTL expiry
+  }
+}
+
+export function deleteClaimFile(): void {
+  try {
+    rmSync(CLAIM_FILE, { force: true });
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * SSE event buffer for a single MCP session.
+ *
+ * When the SSE GET stream is temporarily disconnected, the MCP SDK drops
+ * outbound notifications silently. Providing an EventStore causes it to buffer
+ * them and replay on the next GET /mcp with Last-Event-ID set.
+ *
+ * Accepts a `log` callback so each caller (hub / mux) keeps its own prefix.
+ */
+export class NotificationEventStore implements EventStore {
+  private events = new Map<string, { streamId: string; message: unknown }>();
+  constructor(private readonly log: (...args: unknown[]) => void) {}
+
+  async storeEvent(streamId: string, message: unknown): Promise<string> {
+    const id = `${streamId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    this.events.set(id, { streamId, message });
+    this.log(
+      `[sse] no active stream — buffered event ${id.slice(-8)} (total buffered: ${this.events.size})`,
+    );
+    return id;
+  }
+
+  async replayEventsAfter(
+    lastEventId: string,
+    { send }: { send: (id: string, msg: unknown) => Promise<void> },
+  ): Promise<string> {
+    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+    // New or unknown SSE connection — replay all buffered events for this session.
+    // Each NotificationEventStore is scoped to one session, so replaying all is safe.
+    if (!lastEventId || !this.events.has(lastEventId)) {
+      if (sorted.length > 0) {
+        this.log(`[sse] replaying ${sorted.length} buffered event(s) to new SSE connection`);
+      }
+      for (const [id, { message }] of sorted) {
+        await send(id, message);
+      }
+      const last = sorted[sorted.length - 1];
+      return last ? (last[0].split("_")[0] ?? "") : "";
+    }
+
+    // Resume from a known event ID — skip everything up to and including it.
+    const streamId = lastEventId.split("_")[0] ?? "";
+    let found = false;
+    for (const [id, { streamId: sid, message }] of sorted) {
+      if (sid !== streamId) continue;
+      if (id === lastEventId) {
+        found = true;
+        continue;
+      }
+      if (found) await send(id, message);
+    }
+    return streamId;
+  }
+}
+
+/**
+ * Enrich a notification with claim instructions before delivery.
+ *
+ * Modes:
+ *   "owned"   — pre-routing sent to owner; no claim instruction needed
+ *   "normal"  — claim instruction + worktree decision tree
+ *   "catchall"— "⚠️ CATCH-ALL" header; all recipients must create a worktree
+ */
+export function enrichNotification(
+  n: CINotification,
+  claimKey: string,
+  mode: "owned" | "normal" | "catchall",
+): CINotification {
+  const meta = { ...n.meta, claim_key: claimKey };
+  if (mode === "owned") return { meta, summary: n.summary };
+
+  const branch = n.meta.branch ?? n.meta.head_branch ?? null;
+  const branchSlug = branch?.replace(/[^a-z0-9]/gi, "-") ?? "fix";
+
+  const catchallHeader =
+    mode === "catchall"
+      ? [
+          "⚠️  CATCH-ALL DELIVERY: no session is currently in the worktree for this branch.",
+          "One of you must volunteer by claiming it and creating a worktree.",
+          "",
+        ]
+      : [];
+
+  const worktreeBlock = branch
+    ? [
+        `IF claim returns "ok":`,
+        `  a) Your current branch IS "${branch}":`,
+        `     → Fix here in your current directory`,
+        `  b) Your current branch IS NOT "${branch}":`,
+        `     → git worktree add /tmp/${branchSlug}-fix ${branchSlug}`,
+        `     → Fix in that worktree, commit, push`,
+        `     → Call release_claim("${claimKey}") when done`,
+        `     → git worktree remove /tmp/${branchSlug}-fix`,
+      ]
+    : [
+        `IF claim returns "ok": fix in your current directory.`,
+        `Call release_claim("${claimKey}") when done.`,
+      ];
+
+  const claimBlock = [
+    "",
+    "─────────────────────────────────────────",
+    ...catchallHeader,
+    `BEFORE ACTING: call claim_notification("${claimKey}")`,
+    '  "ok"           → you have the lock, continue',
+    '  "already_owned"→ you already hold it (TTL extended); continue if still working',
+    '  "conflict:X"   → session X claimed it, STOP immediately',
+    '  "expired"      → STOP',
+    "",
+    ...worktreeBlock,
+    "─────────────────────────────────────────",
+  ].join("\n");
+
+  return { meta, summary: n.summary + claimBlock };
+}
+
+/**
+ * Send a `notifications/claude/statusLine` notification to update the
+ * persistent status indicator in the Claude Code UI.
+ * Errors are swallowed — the status line is best-effort.
+ */
+export async function sendStatusLine(server: McpServer, text: string): Promise<void> {
+  try {
+    await server.server.notification({
+      method: "notifications/claude/statusLine",
+      params: { text },
+    });
+  } catch {
+    // Best-effort
+  }
 }
 
 // ── HTTP Webhook Server ───────────────────────────────────────────────────────

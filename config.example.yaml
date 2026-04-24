@@ -13,10 +13,15 @@ server:
   # HTTP port for the incoming GitHub webhook. Env override: WEBHOOK_PORT
   port: 9443
 
-  # Milliseconds to wait after the first review event before firing the batched
-  # notification. Gives GitHub time to deliver all events from a single review
-  # session before Claude acts. Env override: REVIEW_DEBOUNCE_MS
+  # Milliseconds to wait after the first event before firing the batched CI/webhook
+  # notification. Gives GitHub time to deliver all events from a single push before
+  # Claude acts. Env override: REVIEW_DEBOUNCE_MS
   debounce_ms: 30000
+
+  # Milliseconds to wait after the first PR review event before firing the batched
+  # review notification. Longer than debounce_ms to give GitHub time to deliver all
+  # comments from a single review session. Default: 60000 (60 seconds)
+  review_debounce_ms: 60000
 
   # Milliseconds to suppress further notifications for the same PR after one fires.
   # Prevents duplicate responses when a reviewer leaves many comments.
@@ -196,11 +201,36 @@ behavior:
     use_worktree: false
 
     instruction: |
-      Act immediately — no confirmation needed.
+      PR #{pr_number} ({repo}) has review comments — you are the PR AUTHOR.
       1. Call claim_notification first (see claim block below)
-      2. Read full comments: gh pr view {pr_number} --repo {repo} --comments
-      3. Apply fixes and commit
-      4. Use the {skill} skill to post all replies in one shot
+      2. Run: gh pr view {pr_number} --repo {repo} --comments
+      3. Run: gh pr diff {pr_number} --repo {repo}
+      4. Output a markdown table IN THIS SESSION (do NOT post to GitHub yet):
+         | Thread | File:line | Proposed fix | Proposed reply |
+         |--------|-----------|--------------|----------------|
+         (one row per comment thread)
+      5. STOP — wait for explicit user approval of the table
+      After approval: apply fixes, commit, push, then use the pr-comment-response skill to batch-post all replies.
+
+  # Triggered when a PR review, inline comment, or unresolved thread arrives and
+  # the receiving session is the PR REVIEWER (not the author). The hub routes this
+  # notification instead of on_pr_review when the session's github_username differs
+  # from the PR author. Only fires for sessions with branch=null (catch-all sessions).
+  # Placeholders: same as on_pr_review ({skill}, {worktree_preamble}, {pr_number}, {repo})
+  on_pr_review_as_reviewer:
+    skill: review-pr
+    use_worktree: false
+    instruction: |
+      PR #{pr_number} ({repo}) has activity — you are a REVIEWER (not the PR author).
+      1. Call claim_notification first (see claim block below)
+      2. Run: gh pr view {pr_number} --repo {repo} --comments
+      3. Run: gh pr diff {pr_number} --repo {repo}
+      4. Output a review summary IN THIS SESSION (do NOT post to GitHub yet):
+         - Summary of what the PR does
+         - Each comment thread: what was asked, your suggested response
+         - Any code issues you spotted independently
+      5. STOP — wait for explicit user approval before posting anything to GitHub
+      After approval: use the review-pr skill to post the review.
 
   # Triggered when a PR has merge conflicts (mergeable_state=dirty).
   # Placeholders: {repo}, {pr_number}, {pr_title}, {pr_url}, {head_branch},
@@ -341,17 +371,25 @@ code_style: ""
 #         anthropic_api_key: ""          # User's own Anthropic API key (optional)
 #         github_token: ""               # User's own GitHub PAT (optional)
 #
-#       # Per-user instruction overrides — replaces the global behavior config for
-#       # this user's events. Any key omitted falls back to the global config.
 #       # Auto-register filter on connect — no set_filter call needed.
 #       # Useful for daemon / catch-all sessions.
 #       # repo: null   = all repositories
-#       # branch: null = all branches in the repo
+#       # branch: null = all branches in the repo (triggers catch-all grant claim)
+#       #
+#       # Catch-all grant: only ONE session per user can hold the catch-all grant at a time.
+#       # First-claim-wins: if a second session tries set_filter(branch=null), it is denied.
+#       # A grant is released automatically on disconnect, or via the release_catchall tool.
+#       # A stale holder (idle > session_idle_ttl_ms / 2) can be evicted by a new claimer.
+#       # Use get_status to see which session holds the grant; release_catchall to free it.
 #       default_filter:
 #         repo: "keboola/mcp-server"
-#         branch: null      # catch-all: receives all branch notifications
+#         branch: null      # catch-all: claims the grant on connect
 #         label: "daemon"   # shown in conflict messages
 #
+#       # Per-user instruction overrides — any key omitted falls back to the global config.
+#       # Priority: set_behavior tool (SQLite, runtime) > behavior here > global behavior:
+#       # Adjust at runtime without restarting: call the set_behavior MCP tool, or
+#       # call get_behavior to inspect effective config with source annotation.
 #       behavior:
 #         code_style: |
 #           TypeScript strict mode. No any. Prefer const. Functional style.
@@ -361,17 +399,51 @@ code_style: ""
 #           instruction: |
 #             Use the {skill} skill to address all review comments for PR #{pr_number}.
 #             {worktree_preamble}
+#         on_pr_review_as_reviewer:
+#           skill: "review-pr"
+#           instruction: |
+#             PR #{pr_number} ({repo}) has new activity — you are a REVIEWER.
+#             Run: gh pr view {pr_number} --repo {repo} --comments
+#             Use the {skill} skill to perform a thorough code review.
 #         on_ci_failure_branch:
 #           upstream_sync: true
+#           use_agent: true
 #           instruction: |
 #             {health_check_step}
 #             {use_agent_preamble}
 #             Fix the CI failure on {repo} ({branch}). Run: fetch_workflow_logs("{run_url}")
+#         on_ci_failure_main:
+#           upstream_sync: false
+#           use_agent: true
+#           instruction: |
+#             {use_agent_preamble}
+#             CI failure on main branch of {repo}. Run: fetch_workflow_logs("{run_url}")
+#         on_merge_conflict:
+#           instruction: |
+#             PR #{pr_number} ({repo}) has merge conflicts. Rebase and resolve.
+#         on_branch_behind:
+#           instruction: |
+#             PR #{pr_number} ({repo}) is behind base branch. Rebase to bring it up to date.
 #         on_pr_opened:
-#           enabled: true
+#           enabled: true     # disabled by default
 #           instruction: |
 #             New PR #{pr_number} opened by @{author}: {pr_url}
 #             Do a first-pass review and leave inline comments for obvious issues.
+#         on_pr_approved:
+#           enabled: false    # disabled by default
+#           instruction: |
+#             PR #{pr_number} approved by @{reviewer}. Check if ready to merge.
+#         on_dependabot_alert:
+#           enabled: false    # disabled by default
+#           min_severity: "medium"    # low | medium | high | critical
+#           instruction: |
+#             Dependabot alert: {cve} in {package} ({severity}). See: {alert_url}
+#             Patched in: {patched_version}
+#         on_code_scanning_alert:
+#           enabled: false    # disabled by default
+#           min_severity: "warning"   # note | warning | error
+#           instruction: |
+#             Code scanning alert ({severity}): {rule} on {branch}. See: {alert_url}
 #
 #     - github_username: alice
 #       token: "REPLACE_WITH_GENERATED_TOKEN"

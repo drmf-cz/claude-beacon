@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG } from "../config.js";
 import {
   buildReviewNotification,
   createMcpServer,
+  extractEventRouting,
   isActionable,
   isAuthorAllowed,
   isCoAuthorAllowed,
@@ -194,6 +195,7 @@ describe("parseWorkflowEvent", () => {
           conclusion: "failure",
           status: "completed",
           html_url: "https://github.com/acme/myrepo/actions/runs/1/jobs/9",
+          head_branch: "feat/some-feature",
           runner_name: "ubuntu-latest",
           labels: ["ubuntu-latest"],
           steps: [
@@ -221,7 +223,11 @@ describe("parseWorkflowEvent", () => {
     it("returns null for successful check_suite (silent)", () => {
       const payload: GitHubWebhookPayload = {
         ...basePayload,
-        check_suite: { conclusion: "success", app: { name: "GitHub Actions" } },
+        check_suite: {
+          conclusion: "success",
+          head_branch: "main",
+          app: { name: "GitHub Actions" },
+        },
       };
       expect(parseWorkflowEvent("check_suite", payload)).toBeNull();
     });
@@ -229,7 +235,11 @@ describe("parseWorkflowEvent", () => {
     it("formats a failed check_suite", () => {
       const payload: GitHubWebhookPayload = {
         ...basePayload,
-        check_suite: { conclusion: "failure", app: { name: "GitHub Actions" } },
+        check_suite: {
+          conclusion: "failure",
+          head_branch: "feat/some-feature",
+          app: { name: "GitHub Actions" },
+        },
       };
       const result = parseWorkflowEvent("check_suite", payload);
       expect(result?.summary).toContain("❌");
@@ -237,7 +247,11 @@ describe("parseWorkflowEvent", () => {
     });
 
     it("returns null for non-completed check events", () => {
-      const payload = { ...basePayload, action: "created", check_suite: { conclusion: null } };
+      const payload = {
+        ...basePayload,
+        action: "created",
+        check_suite: { conclusion: null, head_branch: null },
+      };
       expect(parseWorkflowEvent("check_suite", payload)).toBeNull();
     });
   });
@@ -487,7 +501,7 @@ describe("buildReviewNotification", () => {
       },
     ];
     const result = buildReviewNotification(events, meta);
-    expect(result.summary).toContain("Act immediately");
+    expect(result.summary).toContain("Invoke the pr-comment-response skill");
     expect(result.summary).toContain("pr-comment-response");
   });
 
@@ -1562,5 +1576,64 @@ describe("token log truncation invariants", () => {
     const shortToken = "abc";
     const logged = `${shortToken.slice(0, 8)}...`;
     expect(logged).toBe("abc...");
+  });
+});
+
+describe("extractEventRouting — branch extraction for CI events", () => {
+  const repo = "acme/myrepo";
+  const base: GitHubWebhookPayload = { repository: { full_name: repo }, action: "completed" };
+
+  it("check_suite extracts head_branch", () => {
+    const r = extractEventRouting("check_suite", {
+      ...base,
+      check_suite: { conclusion: "failure", head_branch: "feat/my-feature" },
+    });
+    expect(r.branch).toBe("feat/my-feature");
+    expect(r.repo).toBe(repo);
+  });
+
+  it("check_run extracts head_branch directly", () => {
+    const r = extractEventRouting("check_run", {
+      ...base,
+      check_run: {
+        name: "CI",
+        conclusion: "failure",
+        html_url: "",
+        head_branch: "feat/my-feature",
+      },
+    });
+    expect(r.branch).toBe("feat/my-feature");
+  });
+
+  it("check_run falls back to check_suite.head_branch", () => {
+    const r = extractEventRouting("check_run", {
+      ...base,
+      check_run: {
+        name: "CI",
+        conclusion: "failure",
+        html_url: "",
+        check_suite: { head_branch: "feat/nested" },
+      },
+    });
+    expect(r.branch).toBe("feat/nested");
+  });
+
+  it("workflow_job extracts head_branch", () => {
+    const r = extractEventRouting("workflow_job", {
+      ...base,
+      workflow_job: {
+        name: "build",
+        conclusion: "failure",
+        status: "completed",
+        html_url: "",
+        head_branch: "feat/my-feature",
+      },
+    });
+    expect(r.branch).toBe("feat/my-feature");
+  });
+
+  it("unknown event falls back to branch: null", () => {
+    const r = extractEventRouting("push", base);
+    expect(r.branch).toBeNull();
   });
 });
