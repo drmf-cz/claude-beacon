@@ -47,6 +47,7 @@
 - `on_pr_review` default: set `use_worktree: false` (was `true`) — the old default injected a false "You are running inside an isolated Claude Code worktree" preamble into the notification even though the receiving session is a normal session, not a worktree. This contradicted the claim block that follows (which tells Claude to check its branch and maybe create a worktree), causing Claude to stall without acting.
 - `on_pr_review` instruction: replace "Plan before acting" language with "Act immediately — no confirmation needed." to match the directive style of other event handlers and prevent unintended plan-mode activation.
 - Remove dead `require_plan` field from `PRReviewBehavior` interface and defaults (it was documented to add an `EnterPlanMode` directive but was never wired into instruction building).
+- **Hub `allowed_authors` mutation**: `config.webhooks.allowed_authors` was being assigned directly on the result of `deepMerge`, which shares nested object references with `DEFAULT_CONFIG`. Fixed by cloning both levels with spread so `DEFAULT_CONFIG` is never mutated.
 
 ## [1.8.3] — 2026-04-15
 
