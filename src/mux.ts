@@ -150,22 +150,49 @@ async function flushPendingToSession(repo: string | null, session: SessionEntry)
       pendingByRepo.delete(key);
       continue;
     }
-    log(`Flushing ${fresh.length} queued notification(s) for ${key} to newly registered session`);
-    let anyDelivered = false;
-    for (const { notification, routing } of fresh) {
-      const claimKey = claimKeyFor(routing);
-      const enriched = enrichNotification(notification, claimKey, "normal");
+
+    // Only flush events whose branch matches this session's filter.
+    // Unmatched events stay queued for a future session on the right branch.
+    const { matched, unmatched } = fresh.reduce<{
+      matched: PendingNotification[];
+      unmatched: PendingNotification[];
+    }>(
+      (acc, n) => {
+        const branchMatches =
+          session.branch === null ||
+          n.routing.branch === null ||
+          n.routing.branch === session.branch;
+        (branchMatches ? acc.matched : acc.unmatched).push(n);
+        return acc;
+      },
+      { matched: [], unmatched: [] },
+    );
+
+    if (matched.length === 0) continue;
+    log(`Flushing ${matched.length} queued notification(s) for ${key} to newly registered session`);
+    if (unmatched.length > 0) {
+      log(`Retaining ${unmatched.length} notification(s) for other branches`);
+    }
+
+    const delivered: PendingNotification[] = [];
+    for (const item of matched) {
+      const claimKey = claimKeyFor(item.routing);
+      const enriched = enrichNotification(item.notification, claimKey, "normal");
       try {
         await sendChannelNotification(session.server, enriched);
-        anyDelivered = true;
+        delivered.push(item);
       } catch (err) {
         log(`Failed to flush pending notification for ${key}:`, err);
       }
     }
-    if (anyDelivered) {
-      pendingByRepo.delete(key);
+
+    // Keep anything that wasn't delivered (unmatched branch or failed send).
+    const deliveredSet = new Set(delivered);
+    const remaining = fresh.filter((n) => !deliveredSet.has(n));
+    if (remaining.length > 0) {
+      pendingByRepo.set(key, remaining);
     } else {
-      log(`All flush attempts failed for ${key} — retaining queue for next session`);
+      pendingByRepo.delete(key);
     }
   }
 }
