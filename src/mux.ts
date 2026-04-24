@@ -32,6 +32,7 @@ import {
   deleteClaimFile,
   enrichNotification,
   NotificationEventStore,
+  reviewCooldowns,
   sendChannelNotification,
   sendStatusLine,
   startWebhookServer,
@@ -288,6 +289,8 @@ const routeToSessions: NotifyFn = async (
     try {
       await sendChannelNotification(session.server, enriched);
       sent++;
+      // Refresh status so any newly-set review cooldown is visible immediately.
+      sendStatusLine(session.server, buildStatusText(session)).catch(() => {});
     } catch (err) {
       log("Failed to push notification to session:", err);
     }
@@ -303,9 +306,27 @@ function buildStatusText(entry: SessionEntry, claimKey?: string, claimExpiresAt?
   const reg = entry.branch
     ? `claude-beacon ✓ registered · ${entry.branch}`
     : `claude-beacon ✓ registered`;
-  if (!claimKey || !claimExpiresAt) return reg;
-  const minsLeft = Math.max(1, Math.ceil((claimExpiresAt - Date.now()) / 60_000));
-  return `${reg} | claim: ${claimKey} (${minsLeft}m left)`;
+
+  const parts: string[] = [];
+  if (claimKey && claimExpiresAt) {
+    const minsLeft = Math.max(1, Math.ceil((claimExpiresAt - Date.now()) / 60_000));
+    parts.push(`claim: ${claimKey} (${minsLeft}m left)`);
+  }
+
+  // Show active review cooldowns for this session's repo
+  if (entry.repo) {
+    const now = Date.now();
+    const prefix = `${entry.repo}:`;
+    for (const [k, expiry] of reviewCooldowns) {
+      if (!k.startsWith(prefix)) continue;
+      if (now >= expiry) continue;
+      const secsLeft = Math.ceil((expiry - now) / 1_000);
+      const pr = k.slice(prefix.length);
+      parts.push(`cooldown: ${pr} (${secsLeft}s)`);
+    }
+  }
+
+  return parts.length > 0 ? `${reg} | ${parts.join(" · ")}` : reg;
 }
 
 // ── Session factory ───────────────────────────────────────────────────────────

@@ -459,7 +459,7 @@ export const DEFAULT_CONFIG: Config = {
   server: {
     port: Number.parseInt(process.env.WEBHOOK_PORT ?? "9443", 10) || 9443,
     debounce_ms: Number.parseInt(process.env.REVIEW_DEBOUNCE_MS ?? "30000", 10) || 30_000,
-    cooldown_ms: 5 * 60 * 1000,
+    cooldown_ms: 3 * 60 * 1000,
     max_events_per_window: 50,
     main_branches: ["main", "master"],
     claim_ttl_ms: 10 * 60 * 1000,
